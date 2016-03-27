@@ -16,7 +16,7 @@ import android.widget.Toast;
 public class MainActivity extends AppCompatActivity {
 
     String mServerAddress = "2402:f000:1:4417::900";
-    String mServerPort = "4567";
+    String mServerPort = "5678";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -30,13 +30,13 @@ public class MainActivity extends AppCompatActivity {
         fab.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-//                Intent intent = VpnService.prepare(MainActivity.this);
-//                if (intent != null) {
-//                    startActivityForResult(intent, 0);
-//                } else {
-//                    onActivityResult(0, RESULT_OK, null);
-//                }
-                Toast.makeText(MainActivity.this, new NdkUtil().getString(), Toast.LENGTH_SHORT).show();
+                Intent intent = VpnService.prepare(MainActivity.this);
+                if (intent != null) {
+                    startActivityForResult(intent, 0);
+                } else {
+                    onActivityResult(0, RESULT_OK, null);
+                }
+                //Toast.makeText(MainActivity.this, new NdkUtil().getString(), Toast.LENGTH_SHORT).show();
             }
         });
     }

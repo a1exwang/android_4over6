@@ -16,28 +16,35 @@ package wang.a1ex.android_4over6;
  * limitations under the License.
  */
 import android.app.PendingIntent;
-import android.app.Service;
 import android.content.Intent;
 import android.net.VpnService;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
+import android.text.TextUtils;
 import android.util.Log;
 import android.widget.Toast;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.net.InetSocketAddress;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.Socket;
 import java.nio.ByteBuffer;
-import java.nio.channels.DatagramChannel;
+import java.util.Locale;
+import java.util.Vector;
+
 public class IVIVpnService extends VpnService implements Handler.Callback, Runnable {
     private static final String TAG = "IVIVpnService";
-    private String mServerAddress;
-    private String mServerPort;
+    private String mServerAddress = "2402:f000:1:4417::900";
+    private String mServerPort = "5678";
     private PendingIntent mConfigureIntent;
     private Handler mHandler;
     private Thread mThread;
     private ParcelFileDescriptor mInterface;
     private String mParameters;
+    private static final int HEARTBEAT_INTERVAL = 5000;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -49,10 +56,6 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         if (mThread != null) {
             mThread.interrupt();
         }
-        // Extract information from the intent.
-        String prefix = getPackageName();
-        mServerAddress = intent.getStringExtra(prefix + ".ADDRESS");
-        mServerPort = intent.getStringExtra(prefix + ".PORT");
         // Start a new session by creating a new thread.
         mThread = new Thread(this, "IVIVpnThread");
         mThread.start();
@@ -67,7 +70,14 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     @Override
     public boolean handleMessage(Message message) {
         if (message != null) {
-            Toast.makeText(this, message.what, Toast.LENGTH_SHORT).show();
+            if (message.obj != null) {
+                String str = (String) message.obj;
+                Toast.makeText(this, str, Toast.LENGTH_SHORT).show();
+            }
+            else {
+                Toast.makeText(this, message.what, Toast.LENGTH_SHORT).show();
+            }
+
         }
         return true;
     }
@@ -75,169 +85,246 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     public synchronized void run() {
         try {
             Log.i(TAG, "Starting");
-            // If anything needs to be obtained using the network, get it now.
-            // This greatly reduces the complexity of seamless handover, which
-            // tries to recreate the tunnel without shutting down everything.
-            // In this demo, all we need to know is the server address.
-            InetSocketAddress server = new InetSocketAddress(
-                    mServerAddress, Integer.parseInt(mServerPort));
-            // We try to create the tunnel for several times. The better way
-            // is to work with ConnectivityManager, such as trying only when
-            // the network is avaiable. Here we just use a counter to keep
-            // things simple.
-            for (int attempt = 0; attempt < 10; ++attempt) {
-                mHandler.sendEmptyMessage(R.string.connecting);
-                // Reset the counter if we were connected.
-                if (run(server)) {
-                    attempt = 0;
-                }
-                // Sleep for a while. This also checks if we got interrupted.
-                Thread.sleep(3000);
-            }
-            Log.i(TAG, "Giving up");
+            startVpn();
         } catch (Exception e) {
             Log.e(TAG, "Got " + e.toString());
         } finally {
-            try {
-                mInterface.close();
-            } catch (Exception e) {
-                // ignore
-            }
-            mInterface = null;
-            mParameters = null;
-            mHandler.sendEmptyMessage(R.string.disconnected);
-            Log.i(TAG, "Exiting");
-        }
-    }
-    private boolean run(InetSocketAddress server) throws Exception {
-        DatagramChannel tunnel = null;
-        boolean connected = false;
-        try {
-            // Create a DatagramChannel as the VPN tunnel.
-            tunnel = DatagramChannel.open();
-            // Protect the tunnel before connecting to avoid loopback.
-            if (!protect(tunnel.socket())) {
-                throw new IllegalStateException("Cannot protect the tunnel");
-            }
-            // Connect to the server.
-            tunnel.connect(server);
-            // For simplicity, we use the same thread for both reading and
-            // writing. Here we put the tunnel into non-blocking mode.
-            tunnel.configureBlocking(false);
-            // Authenticate and configure the virtual network interface.
-            //handshake(tunnel);
-            // Now we are connected. Set the flag and show the message.
-            connected = true;
-            mHandler.sendEmptyMessage(R.string.connected);
-            // Packets to be sent are queued in this input stream.
-            FileInputStream in = new FileInputStream(mInterface.getFileDescriptor());
-            // Packets received need to be written to this output stream.
-            FileOutputStream out = new FileOutputStream(mInterface.getFileDescriptor());
-            // Allocate the buffer for a single packet.
-            ByteBuffer packet = ByteBuffer.allocate(32767);
-            // We use a timer to determine the status of the tunnel. It
-            // works on both sides. A positive value means sending, and
-            // any other means receiving. We start with receiving.
-            int timer = 0;
-            // We keep forwarding packets till something goes wrong.
-            while (true) {
-                // Assume that we did not make any progress in this iteration.
-                boolean idle = true;
-                // Read the outgoing packet from the input stream.
-                int length = in.read(packet.array());
-                if (length > 0) {
-                    // Write the outgoing packet to the tunnel.
-                    packet.limit(length);
-                    tunnel.write(packet);
-                    packet.clear();
-                    // There might be more outgoing packets.
-                    idle = false;
-                    // If we were receiving, switch to sending.
-                    if (timer < 1) {
-                        timer = 1;
-                    }
-                }
-                // Read the incoming packet from the tunnel.
-                length = tunnel.read(packet);
-                if (length > 0) {
-                    // Ignore control messages, which start with zero.
-                    if (packet.get(0) != 0) {
-                        // Write the incoming packet to the output stream.
-                        out.write(packet.array(), 0, length);
-                    }
-                    packet.clear();
-                    // There might be more incoming packets.
-                    idle = false;
-                    // If we were sending, switch to receiving.
-                    if (timer > 0) {
-                        timer = 0;
-                    }
-                }
-                // If we are idle or waiting for the network, sleep for a
-                // fraction of time to avoid busy looping.
-                if (idle) {
-                    Thread.sleep(100);
-                    // Increase the timer. This is inaccurate but good enough,
-                    // since everything is operated in non-blocking mode.
-                    timer += (timer > 0) ? 100 : -100;
-                    // We are receiving for a long time but not sending.
-                    if (timer < -15000) {
-                        // Send empty control messages.
-                        packet.put((byte) 0).limit(1);
-                        for (int i = 0; i < 3; ++i) {
-                            packet.position(0);
-                            tunnel.write(packet);
-                        }
-                        packet.clear();
-                        // Switch to sending.
-                        timer = 1;
-                    }
-                    // We are sending for a long time but not receiving.
-                    if (timer > 20000) {
-                        throw new IllegalStateException("Timed out");
-                    }
-                }
-            }
-        } catch (InterruptedException e) {
-            throw e;
-        } catch (Exception e) {
-            Log.e(TAG, "Got " + e.toString());
-        } finally {
-            try {
-                tunnel.close();
-            } catch (Exception e) {
-                // ignore
-            }
-        }
-        return connected;
-    }
-//    private void handshake(DatagramChannel tunnel) throws Exception {
-//        // To build a secured tunnel, we should perform mutual authentication
-//        // and exchange session keys for encryption. To keep things simple in
-//        // this demo, we just send the shared secret in plaintext and wait
-//        // for the server to send the parameters.
-//        // Allocate the buffer for handshaking.
-//        ByteBuffer packet = ByteBuffer.allocate(1024);
-//        // Control messages always start with zero.
-//        packet.put((byte) 0).put(mSharedSecret).flip();
-//        // Send the secret several times in case of packet loss.
-//        for (int i = 0; i < 3; ++i) {
-//            packet.position(0);
-//            tunnel.write(packet);
-//        }
-//        packet.clear();
-//        // Wait for the parameters within a limited time.
-//        for (int i = 0; i < 50; ++i) {
-//            Thread.sleep(100);
-//            // Normally we should not receive random packets.
-//            int length = tunnel.read(packet);
-//            if (length > 0 && packet.get(0) == 0) {
-//                configure(new String(packet.array(), 1, length - 1).trim());
-//                return;
+//            try {
+//                mInterface.close();
+//            } catch (Exception e) {
+//                // ignore
 //            }
-//        }
-//        throw new IllegalStateException("Timed out");
-//    }
+//            mInterface = null;
+//            mParameters = null;
+//            mHandler.sendEmptyMessage(R.string.disconnected);
+//            Log.i(TAG, "Exiting");
+        }
+    }
+
+    byte []getHelloPacket() {
+        byte []buffer = new byte[5];
+        buffer[0]=buffer[1]=buffer[2]=0;
+        buffer[3] = 5;
+        buffer[4] = CONNECTION_HELLO;
+        return buffer;
+    }
+    byte []getHeatbeatPacket() {
+        byte []buffer = new byte[5];
+        buffer[0]=buffer[1]=buffer[2]=0;
+        buffer[3] = 5;
+        buffer[4] = CONNECTION_HEARTBEAT;
+        return buffer;
+    }
+
+    int packetLengthInt(byte[] buffer, int start) {
+        return (buffer[start]) +
+                (buffer[start + 1] << 8) +
+                (buffer[start + 2] << 16) +
+                (buffer[start + 3] << 24);
+    }
+
+    void packetLengthIntWrite(byte[] buffer, int start, int value) {
+        buffer[start + 3] = (byte)(value >> 24);
+        buffer[start + 2] = (byte)((value >> 16) & 0xFF);
+        buffer[start + 1] = (byte)((value >> 8) & 0xFF);
+        buffer[start + 0] = (byte)((value) & 0xFF);
+    }
+
+    static final byte CONNECTION_HELLO = 100;
+    static final byte CONNECTION_INFO = 101;
+    static final byte CONNECTION_SEND_DATA = 102;
+    static final byte CONNECTION_RECEIVE_DATA = 103;
+    static final byte CONNECTION_HEARTBEAT = 104;
+    static final int MAX_MTU = 65536;
+
+    private static class IVIPacket {
+        public byte type;
+        public int length;
+        public byte[] data;
+    }
+
+    static final int PACKET_LENGTH_OFFSET = 4;
+    static final int PACKET_DATA_OFFSET = 5;
+
+    private byte []buildPacket(byte type, byte[] data, int offset, int length) {
+        int packetLength = length + 5;
+        byte []ret = new byte[packetLength];
+        packetLengthIntWrite(ret, 0, packetLength);
+        ret[PACKET_LENGTH_OFFSET] = type;
+        for (int i = 0; i < length; ++i) {
+            ret[PACKET_DATA_OFFSET + i] = data[offset + i];
+        }
+        return ret;
+    }
+
+    private IVIPacket parsePacket(byte[] packet, int offset, int length) {
+        if (length >= 5) {
+            IVIPacket ret = new IVIPacket();
+            int packetLength = packetLengthInt(packet, offset);
+            if (packetLength >= 5) {
+                ret.length = packetLength - 5;
+                ret.type = packet[4];
+                ret.data = new byte[ret.length];
+                for (int i = 0; i < ret.length; ++i) {
+                    ret.data[i] = packet[5 + i];
+                }
+                return ret;
+            }
+            else {
+                int a = 1;
+                return null;
+            }
+        }
+        else {
+            return null;
+        }
+
+    }
+
+    // receive data from server and send to tun device
+    private void txThread(InputStream socketRead, OutputStream tunWrite) {
+        while (true) {
+            ByteBuffer packet = ByteBuffer.allocate(32767);
+            int readSize = 0;
+            try {
+                readSize = socketRead.read(packet.array());
+                Log.w(TAG, "txThread: " + readSize);
+            } catch (IOException e1) {
+                e1.printStackTrace();
+            }
+
+            if (readSize >= 5) {
+                IVIPacket iviPacket = parsePacket(packet.array(), 0, readSize);
+                if (iviPacket != null) {
+                    switch (iviPacket.type) {
+                        case CONNECTION_RECEIVE_DATA:
+                            try {
+                                tunWrite.write(iviPacket.data);
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            break;
+                        case CONNECTION_HEARTBEAT:
+                            Message message = mHandler.obtainMessage();
+                            message.obj = "heartbeat";
+                            mHandler.sendMessage(message);
+                            Log.w(TAG, "receive heartbeat");
+                            break;
+                    }
+                }
+            }
+        }
+    }
+
+    // receive data from tun device and send to server
+    private void rxThread(InputStream tunRead, OutputStream socketWrite) {
+        byte []buffer = new byte[MAX_MTU];
+        while (true) {
+            try {
+                int count = tunRead.read(buffer);
+                Log.w(TAG, "rxThread: " + String.valueOf(count));
+                if (count == 0) {
+                    Thread.sleep(800);
+                }
+                else {
+                    byte[] packet = buildPacket(CONNECTION_SEND_DATA, buffer, 0, count);
+                    socketWrite.write(packet);
+                    socketWrite.flush();
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private void heartbeatThread(OutputStream socketWrite) {
+        while (true) {
+            try {
+                Log.w(TAG, "heartbeatThread: ");
+                socketWrite.write(getHeatbeatPacket());
+                Message message = new Message();
+                message.obj = "send heartbeat";
+                mHandler.sendMessage(message);
+                Thread.sleep(HEARTBEAT_INTERVAL);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    Socket socket;
+
+    private void startVpn() throws Exception {
+        try {
+            if (socket != null) {
+                socket.close();
+            }
+            socket = new Socket(mServerAddress, Integer.valueOf(mServerPort));
+            final InputStream socketRead = socket.getInputStream();
+            final OutputStream socketWrite = socket.getOutputStream();
+            mHandler.sendEmptyMessage(R.string.connected);
+
+            socketWrite.write(getHelloPacket());
+
+            final FileInputStream tunRead;
+            final FileOutputStream tunWrite;
+
+            byte[] buffer = new byte[MAX_MTU];
+            int readSize = socketRead.read(buffer);
+            IVIPacket iviPacket = parsePacket(buffer, 0, readSize);
+            if (iviPacket != null && iviPacket.type == CONNECTION_INFO) {
+                // establish tun device
+                String info = new String(iviPacket.data, 0, iviPacket.length);
+                Message msg = mHandler.obtainMessage();
+                msg.obj = info;
+                mHandler.sendMessage(msg);
+                configure(info);
+                //tunRead = new FileInputStream(mInterface.getFileDescriptor());
+                //tunWrite = new FileOutputStream(mInterface.getFileDescriptor());
+//                new Thread(new Runnable() {
+//                    @Override
+//                    public void run() {
+//                        txThread(socketRead, tunWrite);
+//                    }
+//                }).start();
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        heartbeatThread(socketWrite);
+                    }
+                }).start();
+                //rxThread(tunRead, socketWrite);
+            }
+            else {
+                throw new RuntimeException("Protocol Error");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Got " + e.toString());
+        }
+    }
+
+    public String getIPv6Address() {
+        BigInteger r = BigInteger.ZERO;
+
+        Vector<String> parts = new Vector<String>();
+        while (r.compareTo(BigInteger.ZERO) == 1 || parts.size() <3) {
+            long part = r.mod(BigInteger.valueOf(0x10000)).longValue();
+            if (part!=0)
+                parts.add(0, String.format(Locale.US, "%x", part));
+            else
+                parts.add(0, "");
+            r = r.shiftRight(16);
+        }
+        String ipv6str = TextUtils.join(":", parts);
+        while (ipv6str.contains(":::"))
+            ipv6str = ipv6str.replace(":::", "::");
+        return ipv6str;
+    }
+
     private void configure(String parameters) throws Exception {
         // If the old interface has exactly the same parameters, use it!
         if (mInterface != null && parameters.equals(mParameters)) {
@@ -246,29 +333,21 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
         // Configure a builder while parsing the parameters.
         Builder builder = new Builder();
-        for (String parameter : parameters.split(" ")) {
-            String[] fields = parameter.split(",");
-            try {
-                switch (fields[0].charAt(0)) {
-                    case 'm':
-                        builder.setMtu(Short.parseShort(fields[1]));
-                        break;
-                    case 'a':
-                        builder.addAddress(fields[1], Integer.parseInt(fields[2]));
-                        break;
-                    case 'r':
-                        builder.addRoute(fields[1], Integer.parseInt(fields[2]));
-                        break;
-                    case 'd':
-                        builder.addDnsServer(fields[1]);
-                        break;
-                    case 's':
-                        builder.addSearchDomain(fields[1]);
-                        break;
-                }
-            } catch (Exception e) {
-                throw new IllegalArgumentException("Bad parameter: " + parameter);
-            }
+        String[] parameterArray = parameters.split(" ");
+        if (parameterArray.length >= 5) {
+            String ip = parameterArray[0];
+            String route = parameterArray[1];
+            builder.setMtu(1500);
+            builder.addAddress(ip, 0);
+//            for (NetworkSpace.ipAddress route6 : positiveIPv6Routes) {
+//                try {
+//                    builder.addRoute(route6.getIPv6Address(), route6.networkMask);
+//                } catch (IllegalArgumentException ia) {
+//                    VpnStatus.logError(getString(R.string.route_rejected) + route6 + " " + ia.getLocalizedMessage());
+//                }
+//            }
+            for (int i = 0; i < 3; ++i)
+                builder.addDnsServer(parameterArray[2 + i]);
         }
         // Close the old interface since the parameters have been changed.
         try {
