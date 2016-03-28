@@ -18,10 +18,13 @@ package wang.a1ex.android_4over6;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
 import android.text.TextUtils;
+import android.text.format.Formatter;
 import android.util.Log;
 import android.widget.Toast;
 import java.io.FileInputStream;
@@ -30,8 +33,14 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigInteger;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.SocketException;
 import java.nio.ByteBuffer;
+import java.util.Enumeration;
 import java.util.Locale;
 import java.util.Vector;
 
@@ -39,7 +48,6 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     private static final String TAG = "IVIVpnService";
     private String mServerAddress = "2402:f000:1:4417::900";
     private String mServerPort = "5678";
-    private PendingIntent mConfigureIntent;
     private Handler mHandler;
     private Thread mThread;
     private ParcelFileDescriptor mInterface;
@@ -88,30 +96,20 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             startVpn();
         } catch (Exception e) {
             Log.e(TAG, "Got " + e.toString());
-        } finally {
-//            try {
-//                mInterface.close();
-//            } catch (Exception e) {
-//                // ignore
-//            }
-//            mInterface = null;
-//            mParameters = null;
-//            mHandler.sendEmptyMessage(R.string.disconnected);
-//            Log.i(TAG, "Exiting");
         }
     }
 
     byte []getHelloPacket() {
         byte []buffer = new byte[5];
-        buffer[0]=buffer[1]=buffer[2]=0;
-        buffer[3] = 5;
+        buffer[0]= 5;buffer[1]=buffer[2]=0;
+        buffer[3] = 0;
         buffer[4] = CONNECTION_HELLO;
         return buffer;
     }
     byte []getHeatbeatPacket() {
         byte []buffer = new byte[5];
-        buffer[0]=buffer[1]=buffer[2]=0;
-        buffer[3] = 5;
+        buffer[0]=0;buffer[1]=buffer[2]=0;
+        buffer[3] = 0;
         buffer[4] = CONNECTION_HEARTBEAT;
         return buffer;
     }
@@ -164,11 +162,16 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             if (packetLength >= 5) {
                 ret.length = packetLength - 5;
                 ret.type = packet[4];
-                ret.data = new byte[ret.length];
-                for (int i = 0; i < ret.length; ++i) {
-                    ret.data[i] = packet[5 + i];
+                if (ret.length < 5000) {
+                    ret.data = new byte[ret.length];
+                    for (int i = 0; i < ret.length; ++i) {
+                        ret.data[i] = packet[5 + i];
+                    }
+                    return ret;
                 }
-                return ret;
+                else {
+                    return null;
+                }
             }
             else {
                 int a = 1;
@@ -224,7 +227,7 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                 int count = tunRead.read(buffer);
                 Log.w(TAG, "rxThread: " + String.valueOf(count));
                 if (count == 0) {
-                    Thread.sleep(800);
+                    Thread.sleep(300);
                 }
                 else {
                     byte[] packet = buildPacket(CONNECTION_SEND_DATA, buffer, 0, count);
@@ -244,9 +247,9 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             try {
                 Log.w(TAG, "heartbeatThread: ");
                 socketWrite.write(getHeatbeatPacket());
-                Message message = new Message();
-                message.obj = "send heartbeat";
-                mHandler.sendMessage(message);
+//                Message message = new Message();
+//                message.obj = "send heartbeat";
+//                mHandler.sendMessage(message);
                 Thread.sleep(HEARTBEAT_INTERVAL);
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -256,6 +259,30 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
     }
 
+    String getLocalIpv6Address() {
+        try {
+            String str = "";
+            for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements();) {
+                NetworkInterface intf = (NetworkInterface) en.nextElement();
+                for (Enumeration<InetAddress> enumIpAddr = intf
+                        .getInetAddresses(); enumIpAddr.hasMoreElements();) {
+                    InetAddress inetAddress = enumIpAddr.nextElement();
+                    if (!inetAddress.isLoopbackAddress() && !inetAddress.isLinkLocalAddress() && inetAddress.toString().contains(":")) {
+                        String ipaddress = inetAddress.getHostAddress();
+                        str = ipaddress.substring(0, ipaddress.length() - 2);
+                        return str;
+                    }
+                }
+            }
+
+            Log.w(TAG, "getLocalIpv6Address: " + str);
+            return str;
+        } catch (SocketException ex) {
+            Log.e(TAG, "Exception in Get IP Address: " + ex.toString());
+        }
+        return null;
+    }
+
     Socket socket;
 
     private void startVpn() throws Exception {
@@ -263,7 +290,16 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             if (socket != null) {
                 socket.close();
             }
-            socket = new Socket(mServerAddress, Integer.valueOf(mServerPort));
+
+            String ipv6Addr = getLocalIpv6Address();
+
+            socket = new Socket();
+            SocketAddress socketAddress = new InetSocketAddress(ipv6Addr, 0);
+            socket.bind(socketAddress);
+            protect(socket);
+
+            socket.connect(new InetSocketAddress(mServerAddress, Integer.valueOf(mServerPort)));
+
             final InputStream socketRead = socket.getInputStream();
             final OutputStream socketWrite = socket.getOutputStream();
             mHandler.sendEmptyMessage(R.string.connected);
@@ -283,21 +319,21 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                 msg.obj = info;
                 mHandler.sendMessage(msg);
                 configure(info);
-                //tunRead = new FileInputStream(mInterface.getFileDescriptor());
-                //tunWrite = new FileOutputStream(mInterface.getFileDescriptor());
-//                new Thread(new Runnable() {
-//                    @Override
-//                    public void run() {
-//                        txThread(socketRead, tunWrite);
-//                    }
-//                }).start();
+                tunRead = new FileInputStream(mInterface.getFileDescriptor());
+                tunWrite = new FileOutputStream(mInterface.getFileDescriptor());
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        txThread(socketRead, tunWrite);
+                    }
+                }).start();
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
                         heartbeatThread(socketWrite);
                     }
                 }).start();
-                //rxThread(tunRead, socketWrite);
+                rxThread(tunRead, socketWrite);
             }
             else {
                 throw new RuntimeException("Protocol Error");
@@ -305,24 +341,6 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         } catch (Exception e) {
             Log.e(TAG, "Got " + e.toString());
         }
-    }
-
-    public String getIPv6Address() {
-        BigInteger r = BigInteger.ZERO;
-
-        Vector<String> parts = new Vector<String>();
-        while (r.compareTo(BigInteger.ZERO) == 1 || parts.size() <3) {
-            long part = r.mod(BigInteger.valueOf(0x10000)).longValue();
-            if (part!=0)
-                parts.add(0, String.format(Locale.US, "%x", part));
-            else
-                parts.add(0, "");
-            r = r.shiftRight(16);
-        }
-        String ipv6str = TextUtils.join(":", parts);
-        while (ipv6str.contains(":::"))
-            ipv6str = ipv6str.replace(":::", "::");
-        return ipv6str;
     }
 
     private void configure(String parameters) throws Exception {
@@ -339,15 +357,10 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             String route = parameterArray[1];
             builder.setMtu(1500);
             builder.addAddress(ip, 0);
-//            for (NetworkSpace.ipAddress route6 : positiveIPv6Routes) {
-//                try {
-//                    builder.addRoute(route6.getIPv6Address(), route6.networkMask);
-//                } catch (IllegalArgumentException ia) {
-//                    VpnStatus.logError(getString(R.string.route_rejected) + route6 + " " + ia.getLocalizedMessage());
-//                }
-//            }
-            for (int i = 0; i < 3; ++i)
-                builder.addDnsServer(parameterArray[2 + i]);
+            builder.addRoute(route, 0);
+            builder.addDnsServer("166.111.8.28");
+            //for (int i = 0; i < 3; ++i)
+            //    builder.addDnsServer(parameterArray[2 + i]);
         }
         // Close the old interface since the parameters have been changed.
         try {
@@ -357,7 +370,6 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
         // Create a new interface using the builder and save the parameters.
         mInterface = builder.setSession(mServerAddress)
-                .setConfigureIntent(mConfigureIntent)
                 .establish();
         mParameters = parameters;
         Log.i(TAG, "New interface: " + parameters);
