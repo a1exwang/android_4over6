@@ -15,11 +15,13 @@ package wang.a1ex.android_4over6;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import android.annotation.TargetApi;
 import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
@@ -47,6 +49,7 @@ import java.util.Vector;
 public class IVIVpnService extends VpnService implements Handler.Callback, Runnable {
     private static final String TAG = "IVIVpnService";
     private String mServerAddress = "2402:f000:1:4417::900";
+    private static final String PCAP_FILE = "packets.pcap";
     private String mServerPort = "5678";
     private Handler mHandler;
     private Thread mThread;
@@ -89,10 +92,12 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
         return true;
     }
+    Pcap pcap;
     @Override
     public synchronized void run() {
         try {
             Log.i(TAG, "Starting");
+            pcap = new Pcap();
             startVpn();
         } catch (Exception e) {
             Log.e(TAG, "Got " + e.toString());
@@ -184,13 +189,35 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
 
     }
 
+    int receivedPacketCount = 0;
+    int receivedByteCount = 0;
+    int sentPacketCount = 0;
+    int sentByteCount = 0;
+
+    void onSendToTun(byte[] packet, int offset, int count) {
+        receivedPacketCount++;
+        receivedByteCount += count;
+
+        pcap.addPacket(packet, offset, count);
+        pcap.saveToSDCardFile(PCAP_FILE);
+    }
+    void onReceiveFromTun(byte[] packet, int offset, int count) {
+        sentPacketCount++;
+        sentByteCount += count;
+
+        pcap.addPacket(packet, offset, count);
+        pcap.saveToSDCardFile(PCAP_FILE);
+    }
+
     // receive data from server and send to tun device
     private void txThread(InputStream socketRead, OutputStream tunWrite) {
         while (true) {
             ByteBuffer packet = ByteBuffer.allocate(32767);
             int readSize = 0;
             try {
-                readSize = socketRead.read(packet.array());
+                synchronized (socketRead) {
+                    readSize = socketRead.read(packet.array());
+                }
                 Log.w(TAG, "txThread: " + readSize);
             } catch (IOException e1) {
                 e1.printStackTrace();
@@ -202,7 +229,10 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                     switch (iviPacket.type) {
                         case CONNECTION_RECEIVE_DATA:
                             try {
-                                tunWrite.write(iviPacket.data);
+                                onSendToTun(iviPacket.data, 0, iviPacket.data.length);
+                                synchronized (tunWrite) {
+                                    tunWrite.write(iviPacket.data);
+                                }
                             } catch (IOException e) {
                                 e.printStackTrace();
                             }
@@ -224,15 +254,21 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         byte []buffer = new byte[MAX_MTU];
         while (true) {
             try {
-                int count = tunRead.read(buffer);
+                int count;
+                synchronized (tunRead) {
+                    count = tunRead.read(buffer);
+                }
+                onReceiveFromTun(buffer, 0, count);
                 Log.w(TAG, "rxThread: " + String.valueOf(count));
                 if (count == 0) {
                     Thread.sleep(300);
                 }
                 else {
                     byte[] packet = buildPacket(CONNECTION_SEND_DATA, buffer, 0, count);
-                    socketWrite.write(packet);
-                    socketWrite.flush();
+                    synchronized (socketWrite) {
+                        socketWrite.write(packet);
+                        socketWrite.flush();
+                    }
                 }
             } catch (IOException e) {
                 e.printStackTrace();
@@ -246,10 +282,10 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         while (true) {
             try {
                 Log.w(TAG, "heartbeatThread: ");
-                socketWrite.write(getHeatbeatPacket());
-//                Message message = new Message();
-//                message.obj = "send heartbeat";
-//                mHandler.sendMessage(message);
+                synchronized (socketWrite) {
+                    socketWrite.write(getHeatbeatPacket());
+                    socketWrite.flush();
+                }
                 Thread.sleep(HEARTBEAT_INTERVAL);
             } catch (InterruptedException e) {
                 e.printStackTrace();
@@ -304,13 +340,19 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             final OutputStream socketWrite = socket.getOutputStream();
             mHandler.sendEmptyMessage(R.string.connected);
 
-            socketWrite.write(getHelloPacket());
+            synchronized (socketWrite) {
+                socketWrite.write(getHelloPacket());
+                socketWrite.flush();
+            }
 
             final FileInputStream tunRead;
             final FileOutputStream tunWrite;
 
             byte[] buffer = new byte[MAX_MTU];
-            int readSize = socketRead.read(buffer);
+            int readSize;
+            synchronized (socketRead) {
+                readSize = socketRead.read(buffer);
+            }
             IVIPacket iviPacket = parsePacket(buffer, 0, readSize);
             if (iviPacket != null && iviPacket.type == CONNECTION_INFO) {
                 // establish tun device
@@ -333,6 +375,24 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                         heartbeatThread(socketWrite);
                     }
                 }).start();
+                new Thread() {
+                    @Override
+                    public void run() {
+                        while (true) {
+                            Intent intent = new Intent(MainActivity.BROADCAST_NAME);
+                            intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_SENT, sentByteCount);
+                            intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_RECEIVED, receivedByteCount);
+                            intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_SEND, sentPacketCount);
+                            intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_RECEIVED, receivedPacketCount);
+                            sendBroadcast(intent);
+                            try {
+                                sleep(2*1000);
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                }.start();
                 rxThread(tunRead, socketWrite);
             }
             else {
@@ -343,6 +403,7 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
     }
 
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private void configure(String parameters) throws Exception {
         // If the old interface has exactly the same parameters, use it!
         if (mInterface != null && parameters.equals(mParameters)) {
@@ -359,6 +420,7 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
             builder.addAddress(ip, 0);
             builder.addRoute(route, 0);
             builder.addDnsServer("166.111.8.28");
+            builder.setBlocking(true);
             //for (int i = 0; i < 3; ++i)
             //    builder.addDnsServer(parameterArray[2 + i]);
         }
@@ -374,5 +436,4 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         mParameters = parameters;
         Log.i(TAG, "New interface: " + parameters);
     }
-
 }
