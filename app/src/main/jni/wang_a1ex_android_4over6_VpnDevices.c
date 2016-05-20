@@ -22,6 +22,8 @@
  * is to be taken "as is" and without any kind of warranty, implicit or   *
  * explicit. See the file LICENSE for further details.                    *
  *************************************************************************/
+#include "wang_a1ex_android_4over6_VpnDevices.h"
+#include "wang_a1ex_android_4over6_VpnDevices_VpnCallbacks.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,40 +53,31 @@
 #define ETH_HDR_LEN 14
 #define ARP_PKT_LEN 28
 
-int debug;
-char *progname;
+int debug = 1;
+
+typedef struct tIVIMessage {
+    uint32_t length;
+    char type;
+    char data[4096];
+};
+#define MSG_DHCP_REQUEST 100
+#define MSG_DHCP_RESPOND 101
+#define MSG_SEND_DATA 102
+#define MSG_RECEIVE_DATA 103
+#define MSG_HEARTBEAT 104
+
+#define IVI_SERVER_IPV6_ADDRESS ""
+#define IVI_SERVER_TCP_PORT 5678
+
+static JNIEnv *s_env;
+static jobject s_this;
 
 /**************************************************************************
  * tun_alloc: allocates or reconnects to a tun/tap device. The caller     *
  *            needs to reserve enough space in *dev.                      *
  **************************************************************************/
-int tun_alloc(char *dev, int flags) {
-
-     struct ifreq ifr;
-     int fd, err;
-
-     if( (fd = open("/dev/net/tun", O_RDWR)) < 0 ) {
-          perror("Opening /dev/net/tun");
-          return fd;
-     }
-
-     memset(&ifr, 0, sizeof(ifr));
-
-     ifr.ifr_flags = flags;
-
-     if (*dev) {
-          strncpy(ifr.ifr_name, dev, IFNAMSIZ);
-     }
-
-     if( (err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0 ) {
-          perror("ioctl(TUNSETIFF)");
-          close(fd);
-          return err;
-     }
-
-     strcpy(dev, ifr.ifr_name);
-
-     return fd;
+int get_tun_fd(int sock_fd) {
+    return 0;
 }
 
 /**************************************************************************
@@ -142,57 +135,22 @@ int read_n(int fd, char *buf, int n) {
 void do_debug(char *msg, ...){
 
      va_list argp;
-
+    char buf[5000] = { 0 };
      if(debug){
           va_start(argp, msg);
-          vfprintf(stderr, msg, argp);
+          vsprintf(buf, msg, argp);
           va_end(argp);
      }
+    LOGD("%s", buf);
 }
 
-/**************************************************************************
- * my_err: prints custom error messages on stderr.                        *
- **************************************************************************/
-void my_err(char *msg, ...) {
 
-     va_list argp;
+void startVpn() {
 
-     va_start(argp, msg);
-     vfprintf(stderr, msg, argp);
-     va_end(argp);
-}
-
-/**************************************************************************
- * usage: prints usage and exits.                                         *
- **************************************************************************/
-void usage(void) {
-     fprintf(stderr, "Usage:\n");
-     fprintf(stderr, "%s -i <ifacename> [-s|-c <serverIP>] [-p <port>] [-u|-a] [-d]\n", progname);
-     fprintf(stderr, "%s -h\n", progname);
-     fprintf(stderr, "\n");
-     fprintf(stderr, "-i <ifacename>: Name of interface to use (mandatory)\n");
-     fprintf(stderr, "-s|-c <serverIP>: run in server mode (-s), or specify server address (-c <serverIP>) (mandatory)\n");
-     fprintf(stderr, "-p <port>: port to listen on (if run in server mode) or to connect to (in client mode), default 55555\n");
-     fprintf(stderr, "-u|-a: use TUN (-u, default) or TAP (-a)\n");
-     fprintf(stderr, "-d: outputs debug information while running\n");
-     fprintf(stderr, "-h: prints this help text\n");
-     exit(1);
-}
-
-int shit(int argc, char *argv[]) {
-
-     int tap_fd, option;
-     int flags = IFF_TUN;
-     char if_name[IFNAMSIZ] = "";
-     int header_len = IP_HDR_LEN;
-     int maxfd;
-     uint16_t nread, nwrite, plength;
-//  uint16_t total_len, ethertype;
-     char buffer[BUFSIZE];
-     struct sockaddr_in local, remote;
-     char remote_ip[16] = "";
+     int nread, nwrite, plength;
+     struct sockaddr_in6 local, remote;
      unsigned short int port = PORT;
-     int sock_fd, net_fd, optval = 1;
+     int sock_fd, net_fd,tun_fd, max_fd;
      socklen_t remotelen;
      int cliserv = -1;    /* must be specified on cmd line */
      unsigned long int tap2net = 0, net2tap = 0;
@@ -254,7 +212,7 @@ int shit(int argc, char *argv[]) {
      }
 
      /* initialize tun/tap interface */
-     if ( (tap_fd = tun_alloc(if_name, flags | IFF_NO_PI)) < 0 ) {
+     if ((tun_fd = get_tun_fd(if_name, flags | IFF_NO_PI)) < 0 ) {
           my_err("Error connecting to tun/tap interface %s!\n", if_name);
           exit(1);
      }
@@ -319,16 +277,16 @@ int shit(int argc, char *argv[]) {
      }
 
      /* use select() to handle two descriptors at once */
-     maxfd = (tap_fd > net_fd)?tap_fd:net_fd;
+     max_fd = (tun_fd > net_fd) ? tun_fd : net_fd;
 
      while(1) {
           int ret;
           fd_set rd_set;
 
           FD_ZERO(&rd_set);
-          FD_SET(tap_fd, &rd_set); FD_SET(net_fd, &rd_set);
+          FD_SET(tun_fd, &rd_set); FD_SET(net_fd, &rd_set);
 
-          ret = select(maxfd + 1, &rd_set, NULL, NULL, NULL);
+          ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
 
           if (ret < 0 && errno == EINTR){
                continue;
@@ -339,10 +297,10 @@ int shit(int argc, char *argv[]) {
                exit(1);
           }
 
-          if(FD_ISSET(tap_fd, &rd_set)){
+          if(FD_ISSET(tun_fd, &rd_set)){
                /* data from tun/tap: just read it and write it to the network */
 
-               nread = cread(tap_fd, buffer, BUFSIZE);
+               nread = cread(tun_fd, buffer, BUFSIZE);
 
                tap2net++;
                do_debug("TAP2NET %lu: Read %d bytes from the tap interface\n", tap2net, nread);
@@ -373,7 +331,7 @@ int shit(int argc, char *argv[]) {
                do_debug("NET2TAP %lu: Read %d bytes from the network\n", net2tap, nread);
 
                /* now buffer[] contains a full packet or frame, write it into the tun/tap interface */
-               nwrite = cwrite(tap_fd, buffer, nread);
+               nwrite = cwrite(tun_fd, buffer, nread);
                do_debug("NET2TAP %lu: Written %d bytes to the tap interface\n", net2tap, nwrite);
           }
      }
@@ -381,8 +339,9 @@ int shit(int argc, char *argv[]) {
      return(0);
 }
 
-#include "wang_a1ex_android_4over6_TunDevice.h"
-JNIEXPORT jstring JNICALL
-                  Java_wang_a1ex_android_14over6_TunDevice_getString(JNIEnv *env, jobject obj) {
-    return (*env)->NewStringUTF(env,"Test C String");
+
+JNIEXPORT void JNICALL Java_wang_a1ex_android_4over6_VpnDevices_startVpn(JNIEnv *env, jobject object) {
+    s_env = env;
+    s_object = object;
+    startVpn();
 }
