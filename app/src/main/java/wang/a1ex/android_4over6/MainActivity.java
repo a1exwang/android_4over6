@@ -69,7 +69,7 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     onActivityResult(0, RESULT_OK, null);
                 }
-                //Toast.makeText(MainActivity.this, new NdkUtil().getString(), Toast.LENGTH_SHORT).show();
+                //Toast.makeText(MainActivity.this, new VpnDevices().getString(), Toast.LENGTH_SHORT).show();
             }
         });
 

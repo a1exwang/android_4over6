@@ -16,17 +16,12 @@ package wang.a1ex.android_4over6;
  * limitations under the License.
  */
 import android.annotation.TargetApi;
-import android.app.PendingIntent;
 import android.content.Intent;
 import android.net.VpnService;
-import android.net.wifi.WifiInfo;
-import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
-import android.text.TextUtils;
-import android.text.format.Formatter;
 import android.util.Log;
 import android.widget.Toast;
 import java.io.FileInputStream;
@@ -34,17 +29,11 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.math.BigInteger;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.Socket;
-import java.net.SocketAddress;
 import java.net.SocketException;
-import java.nio.ByteBuffer;
 import java.util.Enumeration;
-import java.util.Locale;
-import java.util.Vector;
 
 public class IVIVpnService extends VpnService implements Handler.Callback, Runnable {
     private static final String TAG = "IVIVpnService";
@@ -210,21 +199,24 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     }
 
     // receive data from server and send to tun device
-    private void txThread(InputStream socketRead, OutputStream tunWrite) {
+    private void txThread(VpnDevices socketRead, OutputStream tunWrite) {
         while (true) {
-            ByteBuffer packet = ByteBuffer.allocate(32767);
+           // ByteBuffer packet = ByteBuffer.allocate(32767);
+            byte[] packet;
             int readSize = 0;
             try {
-                synchronized (socketRead) {
-                    readSize = socketRead.read(packet.array());
-                }
+                //synchronized (socketRead) {
+                //    readSize = socketRead.read(packet.array());
+                //}
+                packet = socketRead.readSocket();
                 Log.w(TAG, "txThread: " + readSize);
             } catch (IOException e1) {
                 e1.printStackTrace();
+                break;
             }
 
             if (readSize >= 5) {
-                IVIPacket iviPacket = parsePacket(packet.array(), 0, readSize);
+                IVIPacket iviPacket = parsePacket(packet, 0, packet.length);
                 if (iviPacket != null) {
                     switch (iviPacket.type) {
                         case CONNECTION_RECEIVE_DATA:
@@ -250,7 +242,7 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     }
 
     // receive data from tun device and send to server
-    private void rxThread(InputStream tunRead, OutputStream socketWrite) {
+    private void rxThread(InputStream tunRead, VpnDevices socketWrite) {
         byte []buffer = new byte[MAX_MTU];
         while (true) {
             try {
@@ -265,10 +257,7 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                 }
                 else {
                     byte[] packet = buildPacket(CONNECTION_SEND_DATA, buffer, 0, count);
-                    synchronized (socketWrite) {
-                        socketWrite.write(packet);
-                        socketWrite.flush();
-                    }
+                    socketWrite.writeSocket(packet);
                 }
             } catch (IOException e) {
                 e.printStackTrace();
@@ -278,24 +267,23 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
     }
 
-    private void heartbeatThread(OutputStream socketWrite) {
+    // rewrite in C
+    private void heartbeatThread(VpnDevices socketWrite) {
         while (true) {
             try {
                 Log.w(TAG, "heartbeatThread: ");
-                synchronized (socketWrite) {
-                    socketWrite.write(getHeatbeatPacket());
-                    socketWrite.flush();
-                }
+                socketWrite.writeSocket(getHeatbeatPacket());
                 Thread.sleep(HEARTBEAT_INTERVAL);
             } catch (InterruptedException e) {
                 e.printStackTrace();
+                break;
             } catch (IOException e) {
                 e.printStackTrace();
             }
         }
     }
 
-    String getLocalIpv6Address() {
+    public static String getLocalIpv6Address() {
         try {
             String str = "";
             for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements();) {
@@ -327,33 +315,23 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                 socket.close();
             }
 
-            String ipv6Addr = getLocalIpv6Address();
-
             socket = new Socket();
-            SocketAddress socketAddress = new InetSocketAddress(ipv6Addr, 0);
-            socket.bind(socketAddress);
             protect(socket);
-
-            socket.connect(new InetSocketAddress(mServerAddress, Integer.valueOf(mServerPort)));
-
-            final InputStream socketRead = socket.getInputStream();
-            final OutputStream socketWrite = socket.getOutputStream();
+            final VpnDevices vpnDevices = new VpnDevices(socket);
             mHandler.sendEmptyMessage(R.string.connected);
 
-            synchronized (socketWrite) {
-                socketWrite.write(getHelloPacket());
-                socketWrite.flush();
-            }
+            vpnDevices.writeSocket(getHelloPacket());
 
             final FileInputStream tunRead;
             final FileOutputStream tunWrite;
 
-            byte[] buffer = new byte[MAX_MTU];
-            int readSize;
-            synchronized (socketRead) {
-                readSize = socketRead.read(buffer);
-            }
-            IVIPacket iviPacket = parsePacket(buffer, 0, readSize);
+            //byte[] buffer = new byte[MAX_MTU];
+            //int readSize;
+            //synchronized (socketRead) {
+            //    readSize = socketRead.read(buffer);
+            //}
+            byte[] buffer = vpnDevices.readSocket();
+            IVIPacket iviPacket = parsePacket(buffer, 0, buffer.length);
             if (iviPacket != null && iviPacket.type == CONNECTION_INFO) {
                 // establish tun device
                 String info = new String(iviPacket.data, 0, iviPacket.length);
@@ -363,22 +341,24 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                 configure(info);
                 tunRead = new FileInputStream(mInterface.getFileDescriptor());
                 tunWrite = new FileOutputStream(mInterface.getFileDescriptor());
+                // 从socket读取数据发送到tun的线程
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        txThread(socketRead, tunWrite);
+                        txThread(vpnDevices, tunWrite);
                     }
                 }).start();
                 new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        heartbeatThread(socketWrite);
+                        heartbeatThread(vpnDevices);
                     }
                 }).start();
                 new Thread() {
                     @Override
                     public void run() {
                         while (true) {
+                            // 隔一段时间更新一次统计数据
                             Intent intent = new Intent(MainActivity.BROADCAST_NAME);
                             intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_SENT, sentByteCount);
                             intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_RECEIVED, receivedByteCount);
@@ -389,11 +369,13 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                                 sleep(2*1000);
                             } catch (InterruptedException e) {
                                 e.printStackTrace();
+                                break;
                             }
                         }
                     }
                 }.start();
-                rxThread(tunRead, socketWrite);
+                // 从tun读取发送到socket的线程
+                rxThread(tunRead, vpnDevices);
             }
             else {
                 throw new RuntimeException("Protocol Error");

@@ -381,8 +381,8 @@ int shit(int argc, char *argv[]) {
      return(0);
 }
 
-#include "wang_a1ex_android_4over6_NdkUtil.h"
+#include "wang_a1ex_android_4over6_TunDevice.h"
 JNIEXPORT jstring JNICALL
-                  Java_wang_a1ex_android_14over6_NdkUtil_getString(JNIEnv *env, jobject obj) {
+                  Java_wang_a1ex_android_14over6_TunDevice_getString(JNIEnv *env, jobject obj) {
     return (*env)->NewStringUTF(env,"Test C String");
 }
