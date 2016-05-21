@@ -40,6 +40,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <sys/timerfd.h>
 #include <android/log.h>
 
 #define TAG "VpnDevices"
@@ -58,6 +59,8 @@ typedef struct tIVIMessage {
 #define MSG_RECEIVE_DATA 103
 #define MSG_HEARTBEAT 104
 
+#define HEARTBEAT_INTERVAL_SECONDS 5
+
 #define IVI_SERVER_IPV6_ADDRESS "2402:f000:1:4417::900"
 #define IVI_SERVER_TCP_PORT 5678
 
@@ -69,19 +72,19 @@ static jclass s_cls_callbacks;
 /**************************************************************************
  * do_debug: prints debugging stuff (doh!)                                *
  **************************************************************************/
+char do_debug_buf[5000] = { 0 };
 void do_debug(char *msg, ...){
 
     va_list argp;
-    char buf[5000] = { 0 };
     if(debug){
         va_start(argp, msg);
-        vsprintf(buf, msg, argp);
+        vsprintf(do_debug_buf, msg, argp);
         va_end(argp);
     }
-    LOGD("%s", buf);
+    LOGD("%s", do_debug_buf);
 }
 
-int get_tun_fd(int sock_fd) {
+int get_tun_fd(int sock_fd, int pipe_fd) {
     IVIMessage dhcp_req;
     IVIMessage dhcp_res;
     memset(&dhcp_req, 0, sizeof(IVIMessage));
@@ -90,11 +93,11 @@ int get_tun_fd(int sock_fd) {
     dhcp_req.length = 5;
     dhcp_req.type = MSG_DHCP_REQUEST;
 
-    struct timeval tv;
+    //struct timeval tv;
 
-    tv.tv_sec = 20;  /* 30 Secs Timeout */
-    tv.tv_usec = 0;  // Not init'ing this can cause strange errors
-    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(struct timeval));
+    //tv.tv_sec = 20;  /* 30 Secs Timeout */
+    //tv.tv_usec = 0;  // Not init'ing this can cause strange errors
+    //setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, (char *) &tv, sizeof(struct timeval));
 
     char *dhcp_str = NULL;
     int i = 0;
@@ -112,15 +115,16 @@ int get_tun_fd(int sock_fd) {
             return -1;
         if (count >= 1 && dhcp_res.type == MSG_DHCP_RESPOND) {
             dhcp_str = dhcp_res.data;
-            do_debug("before crash?");
-            //((char *) &dhcp_res)[count] = 0;
-            do_debug("dhcp string: %s", dhcp_str);
+           // do_debug("before crash?");
+            dhcp_res.data[count-1] = 0;
+            //do_debug("dhcp string: %s", dhcp_str);
             break;
         }
         else {
             do_debug("receive non dhcp respond");
         }
     }
+
     if (dhcp_str == NULL) {
         return -1;
     }
@@ -128,9 +132,10 @@ int get_tun_fd(int sock_fd) {
     jmethodID jmethod_create_tun = (*s_env)->GetMethodID(s_env,
                                                          s_cls_callbacks,
                                                          "onReceiveDhcpAndCreateTun",
-                                                         "(Ljava/lang/String;)I");
+                                                         "(Ljava/lang/String;I)I");
     jstring jdhcp_str = (*s_env)->NewStringUTF(s_env, dhcp_str);
-    jint jint_fd = (*s_env)->CallIntMethod(s_env, s_callbacks, jmethod_create_tun, jdhcp_str);
+    do_debug("before call java method");
+    jint jint_fd = (*s_env)->CallIntMethod(s_env, s_callbacks, jmethod_create_tun, jdhcp_str, pipe_fd);
     (*s_env)->DeleteLocalRef(s_env, jdhcp_str);
 
     return jint_fd;
@@ -171,36 +176,6 @@ void on_sent_packet(IVIMessage *message) {
 }
 
 /**************************************************************************
- * cread: read routine that checks for errors and exits if an error is    *
- *        returned.                                                       *
- **************************************************************************/
-int cread(int fd, char *buf, int n){
-
-     int nread;
-
-     if((nread=read(fd, buf, n))<0){
-          perror("Reading data");
-          exit(1);
-     }
-     return nread;
-}
-
-/**************************************************************************
- * cwrite: write routine that checks for errors and exits if an error is  *
- *         returned.                                                      *
- **************************************************************************/
-int cwrite(int fd, char *buf, int n){
-
-     int nwrite;
-
-     if((nwrite=write(fd, buf, n))<0){
-          perror("Writing data");
-          exit(1);
-     }
-     return nwrite;
-}
-
-/**************************************************************************
  * read_n: ensures we read exactly n bytes, and puts those into "buf".    *
  *         (unless EOF, of course)                                        *
  **************************************************************************/
@@ -209,7 +184,7 @@ int read_n(int fd, char *buf, int n) {
      int nread, left = n;
 
      while(left > 0) {
-          if ((nread = cread(fd, buf, left))==0){
+          if ((nread = read(fd, buf, left))==0){
                return 0 ;
           }else {
                left -= nread;
@@ -221,17 +196,17 @@ int read_n(int fd, char *buf, int n) {
 
 int startVpn() {
 
-    uint32_t nread, nwrite, plength;
+    int nread, nwrite;
     struct sockaddr_in6 remote;
-    int sock_fd, net_fd, tun_fd, max_fd;
+    int net_fd, tun_fd, max_fd, timer_fd;
     int tun2net = 0, net2tun = 0, tun2net_bytes = 0, net2tun_bytes = 0;
-    char ip_str[100] = { 0 };
+    char ip_str[200] = { 0 };
     int ret;
 
     do_debug("startVpn start");
-    if ((sock_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
-        perror("socket()");
-        exit(1);
+    if ((net_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
+        do_debug("socket()");
+        return -1;
     }
 
     /* Client, try to connect to server */
@@ -241,27 +216,41 @@ int startVpn() {
     remote.sin6_port = htons(IVI_SERVER_TCP_PORT);
 
     /* connection request */
-    ret = connect(sock_fd, (struct sockaddr *) &remote, sizeof(remote));
+    ret = connect(net_fd, (struct sockaddr *) &remote, sizeof(remote));
     if (ret < 0) {
         do_debug("connect() returns %d, errno, %d", ret, errno);
-        close(sock_fd);
-        return -1;
-    }
-    net_fd = sock_fd;
-    inet_ntop(AF_INET6, &remote.sin6_addr, ip_str, sizeof(ip_str));
-    do_debug("CLIENT: Connected to server %s\n", ip_str);
-
-    /* initialize tun/tap interface */
-    tun_fd = get_tun_fd(sock_fd);
-    if (tun_fd <= 0) {
         close(net_fd);
         return -1;
     }
 
+    inet_ntop(AF_INET6, &remote.sin6_addr, ip_str, sizeof(ip_str));
+    do_debug("CLIENT: Connected to server %s\n", ip_str);
+
+    /* initialize tun/tap interface */
+    tun_fd = get_tun_fd(net_fd);
+    if (tun_fd < 0) {
+        close(net_fd);
+        return -1;
+    }
     do_debug("Successfully established tun device, fd %d", tun_fd);
 
-    /* use select() to handle two descriptors at once */
+    /* initialize a timer */
+    timer_fd = timerfd_create(CLOCK_REALTIME, NULL);
+    struct itimerspec timer_p;
+    timer_p.it_value.tv_nsec = 0;
+    timer_p.it_value.tv_sec = 0;
+    timer_p.it_interval.tv_nsec = 0;
+    timer_p.it_interval.tv_sec = HEARTBEAT_INTERVAL_SECONDS;
+    if (0 > timerfd_settime(timer_fd, TFD_TIMER_ABSTIME, &timer_p, NULL)) {
+        do_debug("timerfd_settimer failed");
+        close(tun_fd);
+        close(net_fd);
+        return -1;
+    }
+
+    /* use select() to handle all descriptors at once */
     max_fd = (tun_fd > net_fd) ? tun_fd : net_fd;
+    max_fd = (max_fd > timer_fd) ? max_fd : timer_fd;
 
     do_debug("startVpn 4");
     while (1) {
@@ -270,24 +259,34 @@ int startVpn() {
         FD_ZERO(&rd_set);
         FD_SET(tun_fd, &rd_set);
         FD_SET(net_fd, &rd_set);
+        FD_SET(timer_fd, &rd_set);
 
         ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
-
         if (ret < 0 && errno == EINTR) {
             continue;
         }
 
         if (ret < 0) {
-            perror("select()");
-            close(tun_fd);
-            close(net_fd);
-            return -1;
+            do_debug("select error, error %d", errno);
+            break;
         }
 
         IVIMessage message;
+
+        if (FD_ISSET(timer_fd, &rd_set)) {
+            timerfd_gettime(timer_fd, NULL);
+            nwrite = write(net_fd, (char*)message.data, message.length);
+            if (nwrite < 0) {
+                do_debug("send heartbeat failed %d", nwrite);
+            }
+            else {
+                do_debug("send heartbeat success!");
+            }
+        }
+
         if (FD_ISSET(tun_fd, &rd_set)) {
             /* data from tun/tap: just read it and write it to the network */
-            nread = (uint32_t) cread(tun_fd, message.data, 4096);
+            nread = read(tun_fd, message.data, 4096);
             message.type = MSG_SEND_DATA;
             message.length = nread + sizeof(message.type) + sizeof(message.length);
 
@@ -297,7 +296,9 @@ int startVpn() {
 
             /* write length + packet */
             on_sent_packet(&message);
-            nwrite = (uint32_t) cwrite(net_fd, (char *) &message, message.length);
+            nwrite = write(net_fd, (char *) &message, message.length);
+            if (nwrite < 0)
+                do_debug("TUN2NET write error");
             //do_debug("TUN2NET %d: Written %d bytes to the network\n", tun2net, nwrite);
         }
 
@@ -306,15 +307,26 @@ int startVpn() {
              * We need to read the length first, and then the packet */
 
             /* Read length */
-            nread = (uint32_t) read_n(net_fd, (char *) &message.length, sizeof(message.length));
-            do_debug("NET2TUN %d: Read %d bytes from the network\n", net2tun, nread);
-            if (nread == 0) {
-                /* ctrl-c at the other end */
+            nread = read_n(net_fd, (char *) &message.length, sizeof(message.length));
+            do_debug("read n %d, message length %d", nread, message.length);
+            if (nread < 0) {
+                do_debug("read failed2");
                 break;
             }
 
+            if (message.length < 5) {
+                do_debug("illegal packet");
+                continue;
+            }
+
             /* read packet */
-            nread = (uint32_t) read_n(net_fd, &message.type, message.length - sizeof(message.length));
+            nread = read_n(net_fd, &message.type, message.length - sizeof(message.length));
+            if (nread < 0){
+                do_debug("read failed1 errno %d", errno);
+                continue;
+            }
+
+            do_debug("NET2TUN %d: Read %d bytes from the network\n", net2tun, nread);
             if (message.length >= 5)
                 on_received_packet(&message);
 
@@ -322,12 +334,14 @@ int startVpn() {
                 case MSG_RECEIVE_DATA:
                     net2tun++;
                     net2tun_bytes += nread;
-                    nwrite = (uint32_t) cwrite(tun_fd, (char*)message.data, message.length - sizeof(message.length) - sizeof(message.type));
+                    nwrite = (uint32_t) write(tun_fd, (char*)message.data, message.length - sizeof(message.length) - sizeof(message.type));
+                    if (nwrite < 0) {
+                        do_debug("NET2TUN write error");
+                    }
                     //do_debug("NET2TUN %d: Written %d bytes to the tun interface\n", net2tun, nwrite);
                     break;
                 case MSG_HEARTBEAT:
                     on_heartbeat();
-                    cwrite(sock_fd, (char*)message.data, message.length);
                     do_debug("heartbeat received");
                     break;
                 default:
@@ -336,9 +350,16 @@ int startVpn() {
         }
         on_statistics(net2tun_bytes, net2tun, tun2net_bytes, tun2net);
     }
+
     do_debug("quit");
+    close(timer_fd);
     close(tun_fd);
     close(net_fd);
+
+    (*s_env)->DeleteLocalRef(s_env, s_this);
+    (*s_env)->DeleteLocalRef(s_env, s_callbacks);
+    (*s_env)->DeleteLocalRef(s_env, s_cls_callbacks);
+
     return 0;
 }
 
@@ -347,7 +368,6 @@ JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv
     s_this = object;
 
     jclass this_class = (*s_env)->GetObjectClass(s_env, s_this);
-
     jfieldID fidNumber = (*s_env)->GetFieldID(s_env, this_class, "vpnCallbacks", "Lwang/a1ex/android_4over6/VpnCallbacks;");
     (*s_env)->DeleteLocalRef(s_env, this_class);
 
@@ -355,5 +375,7 @@ JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv
     s_callbacks = (*s_env)->GetObjectField(s_env, s_this, fidNumber);
     s_cls_callbacks = (*s_env)->FindClass(s_env, "wang/a1ex/android_4over6/VpnCallbacks");
 
-    return startVpn();
+    jint ret = startVpn();
+    do_debug("startVpn() returns %d", ret);
+    return ret;
 }

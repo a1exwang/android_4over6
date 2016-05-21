@@ -15,6 +15,7 @@ android {
             moduleName "VpnDevices"
             abiFilters "armeabi", "armeabi-v7a", "x86", "x86_64"
             ldLibs "log"
+            cFlags "-Wall"
         }
     }
     buildTypes {

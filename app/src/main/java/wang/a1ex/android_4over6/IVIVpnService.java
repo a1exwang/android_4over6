@@ -36,9 +36,8 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
     private String mServerPort = "5678";
     private Handler mHandler;
     private Thread mThread;
-    private static final long StatisticsInterval = 1000;
-    private static final int HEARTBEAT_INTERVAL = 5000;
-
+    private static final long StatisticsInterval = 500;
+    long lastStatisticsTime = 0;
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         // The handler is only used to show messages.
@@ -86,48 +85,51 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
     }
 
+    VpnCallbacks vpnCallbacks = new VpnCallbacks() {
+        @Override
+        public void onHeartbeat() {
+            Log.d("IVIVpnService", "on heartbeat");
+        }
+
+        @Override
+        public void onStatistics(int rBytes, int rPackets, int sBytes, int sPackets) {
+            if (System.currentTimeMillis() - lastStatisticsTime > StatisticsInterval) {
+                lastStatisticsTime = System.currentTimeMillis();
+                Intent intent = new Intent(MainActivity.BROADCAST_NAME);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_SENT, sBytes);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_RECEIVED, rBytes);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_SEND, sPackets);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_RECEIVED, rPackets);
+                sendBroadcast(intent);
+            }
+        }
+
+        @Override
+        public int onReceiveDhcpAndCreateTun(String dhcpString, int pipeFd) {
+            //Socket socket =
+            return configure(dhcpString);
+        }
+
+        @Override
+        public void onPacketReceived(int length, byte type, byte[] packet) {
+            Log.d("IVIVpnService", "onPacketReceived " + String.valueOf(length));
+            pcap.addPacket(packet);
+            pcap.saveToSDCardFile("vpn.pcap");
+        }
+
+        @Override
+        public void onPacketSent(int length, byte type, byte[] packet) {
+            Log.d("IVIVpnService", "onPacketSent " + String.valueOf(length));
+            pcap.addPacket(packet);
+            pcap.saveToSDCardFile("vpn.pcap");
+        }
+    };
+
     private void startVpnLoop() {
-        final long lastStatisticsTime = System.currentTimeMillis();
-        VpnCallbacks cbs = new VpnCallbacks() {
-            @Override
-            public void onHeartbeat() {
-                Log.d("IVIVpnService", "on heartbeat");
-            }
-
-            @Override
-            public void onStatistics(int rBytes, int rPackets, int sBytes, int sPackets) {
-                if (System.currentTimeMillis() - lastStatisticsTime > StatisticsInterval) {
-                    Intent intent = new Intent(MainActivity.BROADCAST_NAME);
-                    intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_SENT, sBytes);
-                    intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_RECEIVED, rBytes);
-                    intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_SEND, sPackets);
-                    intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_RECEIVED, rPackets);
-                    sendBroadcast(intent);
-                }
-            }
-
-            @Override
-            public int onReceiveDhcpAndCreateTun(String dhcpString) {
-                //Socket socket =
-                return configure(dhcpString);
-            }
-
-            @Override
-            public void onPacketReceived(int length, byte type, byte[] packet) {
-                Log.d("IVIVpnService", "onPacketReceived " + String.valueOf(length));
-
-            }
-
-            @Override
-            public void onPacketSent(int length, byte type, byte[] packet) {
-                Log.d("IVIVpnService", "onPacketSent " + String.valueOf(length));
-                pcap.addPacket(packet);
-                pcap.saveToSDCardFile("vpn.pcap");
-            }
-        };
-
-        VpnDevices vpnDevices = new VpnDevices(cbs);
-        vpnDevices.startVpn();
+        while (true) {
+            VpnDevices vpnDevices = new VpnDevices(vpnCallbacks);
+            vpnDevices.startVpn();
+        }
     }
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
