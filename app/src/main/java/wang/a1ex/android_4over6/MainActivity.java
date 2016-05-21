@@ -22,6 +22,8 @@ import android.widget.Toast;
 
 import org.w3c.dom.Text;
 
+import java.lang.reflect.Method;
+
 public class MainActivity extends AppCompatActivity {
 
     String mServerAddress = "2402:f000:1:4417::900";
@@ -72,8 +74,6 @@ public class MainActivity extends AppCompatActivity {
                 //Toast.makeText(MainActivity.this, new VpnDevices().getString(), Toast.LENGTH_SHORT).show();
             }
         });
-
-
     }
 
     public static final String BROADCAST_NAME = "wang.a1ex.android_4over6.StatisticsBroadcast";

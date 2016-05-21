@@ -10,9 +10,9 @@ extern "C" {
 /*
  * Class:     wang_a1ex_android_4over6_VpnDevices
  * Method:    startVpn
- * Signature: ()V
+ * Signature: ()I
  */
-JNIEXPORT void JNICALL Java_wang_a1ex_android_4over6_VpnDevices_startVpn
+JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn
   (JNIEnv *, jobject);
 
 #ifdef __cplusplus
