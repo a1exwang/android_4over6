@@ -48,10 +48,12 @@
 
 int debug = 1;
 
+#define IVI_MESSAGE_MAX_SIZE 4096
+
 typedef struct tIVIMessage {
-    uint32_t length;
+    int length;
     char type;
-    char data[4096];
+    char data[IVI_MESSAGE_MAX_SIZE];
 } IVIMessage;
 #define MSG_DHCP_REQUEST 100
 #define MSG_DHCP_RESPOND 101
@@ -60,19 +62,18 @@ typedef struct tIVIMessage {
 #define MSG_HEARTBEAT 104
 
 #define HEARTBEAT_INTERVAL_SECONDS 5
+#define JAVA_JNI_PIPE_JTOC_PATH "/tmp/wang.a1ex.android_4over6.pipe.jtoc"
+#define JAVA_JNI_PIPE_CTOJ_PATH "/tmp/wang.a1ex.android_4over6.pipe.ctoj"
+#define JAVA_JNI_PIPE_BUFFER_MAX_SIZE 1024
+#define JAVA_JNI_PIPE_OPCODE_SHUTDOWN 100
 
 #define IVI_SERVER_IPV6_ADDRESS "2402:f000:1:4417::900"
 #define IVI_SERVER_TCP_PORT 5678
 
-static JNIEnv *s_env;
-static jobject s_this;
-static jobject s_callbacks;
-static jclass s_cls_callbacks;
-
 /**************************************************************************
  * do_debug: prints debugging stuff (doh!)                                *
  **************************************************************************/
-char do_debug_buf[5000] = { 0 };
+static char do_debug_buf[5000] = { 0 };
 void do_debug(char *msg, ...){
 
     va_list argp;
@@ -84,7 +85,7 @@ void do_debug(char *msg, ...){
     LOGD("%s", do_debug_buf);
 }
 
-int get_tun_fd(int sock_fd, int pipe_fd) {
+int get_tun_fd(int sock_fd, JNIEnv *env, jobject callbacks, jclass cls_callbacks) {
     IVIMessage dhcp_req;
     IVIMessage dhcp_res;
     memset(&dhcp_req, 0, sizeof(IVIMessage));
@@ -116,7 +117,7 @@ int get_tun_fd(int sock_fd, int pipe_fd) {
         if (count >= 1 && dhcp_res.type == MSG_DHCP_RESPOND) {
             dhcp_str = dhcp_res.data;
            // do_debug("before crash?");
-            dhcp_res.data[count-1] = 0;
+//            dhcp_res.data[count-1] = 0;
             //do_debug("dhcp string: %s", dhcp_str);
             break;
         }
@@ -129,50 +130,50 @@ int get_tun_fd(int sock_fd, int pipe_fd) {
         return -1;
     }
     // call this.vpnCallbacks.onReceiveDhcpAndCreateTun(dhcp_str);
-    jmethodID jmethod_create_tun = (*s_env)->GetMethodID(s_env,
-                                                         s_cls_callbacks,
+    jmethodID jmethod_create_tun = (*env)->GetMethodID(env,
+                                                         cls_callbacks,
                                                          "onReceiveDhcpAndCreateTun",
-                                                         "(Ljava/lang/String;I)I");
-    jstring jdhcp_str = (*s_env)->NewStringUTF(s_env, dhcp_str);
+                                                         "(Ljava/lang/String;)I");
+    jstring jdhcp_str = (*env)->NewStringUTF(env, dhcp_str);
     do_debug("before call java method");
-    jint jint_fd = (*s_env)->CallIntMethod(s_env, s_callbacks, jmethod_create_tun, jdhcp_str, pipe_fd);
-    (*s_env)->DeleteLocalRef(s_env, jdhcp_str);
+    jint jint_fd = (*env)->CallIntMethod(env, callbacks, jmethod_create_tun, jdhcp_str);
+    (*env)->DeleteLocalRef(env, jdhcp_str);
 
     return jint_fd;
 }
 
-void on_statistics(int r_bytes, int r_packets, int s_bytes, int s_packets) {
-    jmethodID method = (*s_env)->GetMethodID(s_env, s_cls_callbacks, "onStatistics", "(IIII)V");
-    (*s_env)->CallVoidMethod(s_env, s_callbacks, method, r_bytes, r_packets, s_bytes, s_packets);
+void on_statistics(int r_bytes, int r_packets, int s_bytes, int s_packets, JNIEnv *env, jobject callbacks, jclass cls_callbacks) {
+    jmethodID method = (*env)->GetMethodID(env, cls_callbacks, "onStatistics", "(IIII)V");
+    (*env)->CallVoidMethod(env, callbacks, method, r_bytes, r_packets, s_bytes, s_packets);
 }
 
-void on_heartbeat() {
-    jmethodID method = (*s_env)->GetMethodID(s_env, s_cls_callbacks, "onHeartbeat", "()V");
-    (*s_env)->CallVoidMethod(s_env, s_callbacks, method);
+void on_heartbeat(JNIEnv *env, jobject callbacks, jclass cls_callbacks) {
+    jmethodID method = (*env)->GetMethodID(env, cls_callbacks, "onHeartbeat", "()V");
+    (*env)->CallVoidMethod(env, callbacks, method);
 }
 
-void on_received_packet(IVIMessage *message) {
+void on_received_packet(IVIMessage *message, JNIEnv *env, jobject callbacks, jclass cls_callbacks) {
     jint len = message->length;
     jbyte type = message->type;
 
-    jbyteArray packet = (*s_env)->NewByteArray(s_env, message->length - sizeof(message->length) - sizeof(message->type));
-    (*s_env)->SetByteArrayRegion(s_env, packet, 0, message->length - sizeof(message->length) - sizeof(message->type), (jbyte*)message->data);
+    jbyteArray packet = (*env)->NewByteArray(env, message->length - sizeof(message->length) - sizeof(message->type));
+    (*env)->SetByteArrayRegion(env, packet, 0, message->length - sizeof(message->length) - sizeof(message->type), (jbyte*)message->data);
 
-    jmethodID method = (*s_env)->GetMethodID(s_env, s_cls_callbacks, "onPacketReceived", "(IB[B)V");
-    (*s_env)->CallVoidMethod(s_env, s_callbacks, method, len, type, packet);
-    (*s_env)->DeleteLocalRef(s_env, packet);
+    jmethodID method = (*env)->GetMethodID(env, cls_callbacks, "onPacketReceived", "(IB[B)V");
+    (*env)->CallVoidMethod(env, callbacks, method, len, type, packet);
+    (*env)->DeleteLocalRef(env, packet);
 }
 
-void on_sent_packet(IVIMessage *message) {
+void on_sent_packet(IVIMessage *message, JNIEnv *env, jobject callbacks, jclass cls_callbacks) {
     jint len = message->length;
     jbyte type = message->type;
 
-    jobjectArray packet = (*s_env)->NewByteArray(s_env, message->length - sizeof(message->length) - sizeof(message->type));
-    (*s_env)->SetByteArrayRegion(s_env, packet, 0, message->length - sizeof(message->length) - sizeof(message->type), (jbyte*)message->data);
+    jobjectArray packet = (*env)->NewByteArray(env, message->length - sizeof(message->length) - sizeof(message->type));
+    (*env)->SetByteArrayRegion(env, packet, 0, message->length - sizeof(message->length) - sizeof(message->type), (jbyte*)message->data);
 
-    jmethodID method = (*s_env)->GetMethodID(s_env, s_cls_callbacks, "onPacketSent", "(IB[B)V");
-    (*s_env)->CallVoidMethod(s_env, s_callbacks, method, len, type, packet);
-    (*s_env)->DeleteLocalRef(s_env, packet);
+    jmethodID method = (*env)->GetMethodID(env, cls_callbacks, "onPacketSent", "(IB[B)V");
+    (*env)->CallVoidMethod(env, callbacks, method, len, type, packet);
+    (*env)->DeleteLocalRef(env, packet);
 }
 
 /**************************************************************************
@@ -193,46 +194,81 @@ int read_n(int fd, char *buf, int n) {
      }
      return n;
 }
-
-int startVpn() {
+static char ip_str[1000] = { 0 };
+int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, jshort jport) {
 
     int nread, nwrite;
     struct sockaddr_in6 remote;
-    int net_fd, tun_fd, max_fd, timer_fd;
+    struct sockaddr_in java_addr;
+    int net_fd, tun_fd, max_fd, timer_fd, jsock_fd;
     int tun2net = 0, net2tun = 0, tun2net_bytes = 0, net2tun_bytes = 0;
-    char ip_str[200] = { 0 };
     int ret;
 
     do_debug("startVpn start");
+
+    if ((jsock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        do_debug("socket()");
+        return -1;
+    }
+
+    /* Client, try to connect to server */
+    memset(&java_addr, 0, sizeof(java_addr));
+    java_addr.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &java_addr.sin_addr.s_addr);
+    java_addr.sin_port = htons(jport);
+
+    /* connection request */
+    ret = connect(jsock_fd, (struct sockaddr *) &java_addr, sizeof(java_addr));
+    if (ret < 0) {
+        do_debug("connect() returns %d, errno, %d", ret, errno);
+        close(jsock_fd);
+        return -1;
+    }
+
+    inet_ntop(AF_INET, &java_addr.sin_addr, ip_str, sizeof(ip_str));
+    do_debug("Connected to java %s\n", ip_str);
+
+    do_debug("started creating ipv6 socket");
     if ((net_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
         do_debug("socket()");
+        //close(jsock_fd);
         return -1;
     }
 
     /* Client, try to connect to server */
     memset(&remote, 0, sizeof(remote));
     remote.sin6_family = AF_INET6;
-    inet_pton(AF_INET6, IVI_SERVER_IPV6_ADDRESS, &remote.sin6_addr.s6_addr);
+    inet_pton(AF_INET6, IVI_SERVER_IPV6_ADDRESS, remote.sin6_addr.s6_addr);
     remote.sin6_port = htons(IVI_SERVER_TCP_PORT);
 
     /* connection request */
     ret = connect(net_fd, (struct sockaddr *) &remote, sizeof(remote));
     if (ret < 0) {
-        do_debug("connect() returns %d, errno, %d", ret, errno);
+        do_debug("netfd connect() returns %d, errno, %d", ret, errno);
         close(net_fd);
+        //close(jsock_fd);
         return -1;
     }
 
-    inet_ntop(AF_INET6, &remote.sin6_addr, ip_str, sizeof(ip_str));
-    do_debug("CLIENT: Connected to server %s\n", ip_str);
+//    inet_ntop(AF_INET6, &remote.sin6_addr, ip_str, sizeof(ip_str));
+//    do_debug("CLIENT: Connected to server %s\n", ip_str);
 
     /* initialize tun/tap interface */
-    tun_fd = get_tun_fd(net_fd);
+    tun_fd = get_tun_fd(net_fd, env, callbacks, cls_callbacks);
     if (tun_fd < 0) {
         close(net_fd);
+        close(jsock_fd);
         return -1;
     }
     do_debug("Successfully established tun device, fd %d", tun_fd);
+
+    int flags = fcntl(net_fd, F_GETFL, 0);
+    if (flags < 0)
+        do_debug("change socket to non-blocking failed: fcntl failed, errno: %d", errno);
+    flags |= O_NONBLOCK;
+    if (fcntl(net_fd, F_SETFL, flags) < 0)
+        do_debug("change socket to non-blocking failed: fcntl 2 failed, errno: %d", errno);
+    do_debug("change socket to non-blocking done");
 
     /* initialize a timer */
     timer_fd = timerfd_create(CLOCK_REALTIME, NULL);
@@ -245,12 +281,15 @@ int startVpn() {
         do_debug("timerfd_settimer failed");
         close(tun_fd);
         close(net_fd);
+        close(jsock_fd);
         return -1;
     }
 
     /* use select() to handle all descriptors at once */
-    max_fd = (tun_fd > net_fd) ? tun_fd : net_fd;
+    max_fd = net_fd;
+    max_fd = (max_fd > tun_fd) ? max_fd : tun_fd;
     max_fd = (max_fd > timer_fd) ? max_fd : timer_fd;
+    max_fd = (max_fd > jsock_fd) ? max_fd : jsock_fd;
 
     do_debug("startVpn 4");
     while (1) {
@@ -260,6 +299,7 @@ int startVpn() {
         FD_SET(tun_fd, &rd_set);
         FD_SET(net_fd, &rd_set);
         FD_SET(timer_fd, &rd_set);
+        FD_SET(jsock_fd, &rd_set);
 
         ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
         if (ret < 0 && errno == EINTR) {
@@ -271,13 +311,44 @@ int startVpn() {
             break;
         }
 
-        IVIMessage message;
+        if (FD_SET(jsock_fd, &rd_set)) {
+            size_t size;
+            do_debug("start read pipe");
+            if (read(jsock_fd, &size, sizeof(size)) && size < JAVA_JNI_PIPE_BUFFER_MAX_SIZE) {
+                do_debug("read pipe failed");
+            }
+
+            char *buf = malloc(size);
+            int rresult = read(jsock_fd, buf, size);
+            if (rresult != size) {
+                do_debug("java jni pipe packet wrong format");
+                continue;
+            }
+            char *str = buf + 1;
+            int shutdown = 0;
+            switch(buf[0]) {
+                case JAVA_JNI_PIPE_OPCODE_SHUTDOWN:
+                    shutdown = 1;
+                    break;
+                default:
+                    do_debug("java jni pipe unknown opcode");
+            }
+
+            free(buf);
+
+            if (shutdown) {
+                break;
+            }
+        }
 
         if (FD_ISSET(timer_fd, &rd_set)) {
+            IVIMessage message;
             timerfd_gettime(timer_fd, NULL);
-            nwrite = write(net_fd, (char*)message.data, message.length);
-            if (nwrite < 0) {
-                do_debug("send heartbeat failed %d", nwrite);
+            message.length = 5;
+            message.type = MSG_HEARTBEAT;
+            nwrite = write(net_fd, (char*)&message, (size_t) message.length);
+            if (nwrite != message.length) {
+                do_debug("send heartbeat failed %d, errno", nwrite, errno);
             }
             else {
                 do_debug("send heartbeat success!");
@@ -285,18 +356,23 @@ int startVpn() {
         }
 
         if (FD_ISSET(tun_fd, &rd_set)) {
+            IVIMessage message;
             /* data from tun/tap: just read it and write it to the network */
             nread = read(tun_fd, message.data, 4096);
+            if (nread < 0 || nread > 4096) {
+                do_debug("read from tun failed, error %d", errno);
+                continue;
+            }
             message.type = MSG_SEND_DATA;
             message.length = nread + sizeof(message.type) + sizeof(message.length);
 
             tun2net++;
             tun2net_bytes += nread;
-            do_debug("TUN2NET %d: Read %d bytes from the tun interface\n", tun2net, nread);
+//            do_debug("TUN2NET %d: Read %d bytes from the tun interface\n", tun2net, nread);
 
             /* write length + packet */
-            on_sent_packet(&message);
-            nwrite = write(net_fd, (char *) &message, message.length);
+            on_sent_packet(&message, env, callbacks, cls_callbacks);
+            nwrite = write(net_fd, (char *) &message, (size_t) message.length);
             if (nwrite < 0)
                 do_debug("TUN2NET write error");
             //do_debug("TUN2NET %d: Written %d bytes to the network\n", tun2net, nwrite);
@@ -306,76 +382,89 @@ int startVpn() {
             /* data from the network: read it, and write it to the tun/tap interface.
              * We need to read the length first, and then the packet */
 
-            /* Read length */
-            nread = read_n(net_fd, (char *) &message.length, sizeof(message.length));
-            do_debug("read n %d, message length %d", nread, message.length);
-            if (nread < 0) {
-                do_debug("read failed2");
-                break;
-            }
-
-            if (message.length < 5) {
-                do_debug("illegal packet");
+            int bytes_available;
+            if (ioctl(net_fd, FIONREAD, &bytes_available) < 0 || bytes_available < 0) {
+                do_debug("ioctl netfd FIONREAD failed errno %d", errno);
                 continue;
             }
 
-            /* read packet */
-            nread = read_n(net_fd, &message.type, message.length - sizeof(message.length));
-            if (nread < 0){
-                do_debug("read failed1 errno %d", errno);
+            char *temp_buf = malloc((size_t) bytes_available);
+            nread = read_n(net_fd, temp_buf, bytes_available);
+
+            if (nread < 5 || nread > sizeof(IVIMessage)) {
+                do_debug("wrong packet size %d", nread);
+                free(temp_buf);
                 continue;
             }
 
-            do_debug("NET2TUN %d: Read %d bytes from the network\n", net2tun, nread);
-            if (message.length >= 5)
-                on_received_packet(&message);
+            IVIMessage *pmessage = (IVIMessage*) temp_buf;
+            if (pmessage->length != nread) {
+                do_debug("illegal packet, message.length = %d, nread = %d", pmessage->length, nread);
+                free(temp_buf);
+                continue;
+            }
 
-            switch (message.type) {
+//            do_debug("NET2TUN %d: Read %d bytes from the network\n", net2tun, nread);
+            on_received_packet(pmessage, env, callbacks, cls_callbacks);
+
+            switch (pmessage->type) {
                 case MSG_RECEIVE_DATA:
                     net2tun++;
                     net2tun_bytes += nread;
-                    nwrite = (uint32_t) write(tun_fd, (char*)message.data, message.length - sizeof(message.length) - sizeof(message.type));
+                    nwrite = (uint32_t) write(tun_fd,
+                                              (char*)pmessage->data,
+                                              pmessage->length - sizeof(pmessage->length) - sizeof(pmessage->type));
                     if (nwrite < 0) {
                         do_debug("NET2TUN write error");
                     }
-                    //do_debug("NET2TUN %d: Written %d bytes to the tun interface\n", net2tun, nwrite);
+//                    do_debug("NET2TUN %d: Written %d bytes to the tun interface\n", net2tun, nwrite);
                     break;
                 case MSG_HEARTBEAT:
-                    on_heartbeat();
+                    on_heartbeat(env, callbacks, cls_callbacks);
                     do_debug("heartbeat received");
                     break;
                 default:
                     do_debug("packet type unknown!");
             }
+            free(temp_buf);
         }
-        on_statistics(net2tun_bytes, net2tun, tun2net_bytes, tun2net);
+        on_statistics(net2tun_bytes, net2tun, tun2net_bytes, tun2net, env, callbacks, cls_callbacks);
     }
 
     do_debug("quit");
     close(timer_fd);
     close(tun_fd);
     close(net_fd);
-
-    (*s_env)->DeleteLocalRef(s_env, s_this);
-    (*s_env)->DeleteLocalRef(s_env, s_callbacks);
-    (*s_env)->DeleteLocalRef(s_env, s_cls_callbacks);
+    close(jsock_fd);
 
     return 0;
 }
 
-JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv *env, jobject object) {
-    s_env = env;
-    s_this = object;
+JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv *env, jobject this) {
 
-    jclass this_class = (*s_env)->GetObjectClass(s_env, s_this);
-    jfieldID fidNumber = (*s_env)->GetFieldID(s_env, this_class, "vpnCallbacks", "Lwang/a1ex/android_4over6/VpnCallbacks;");
-    (*s_env)->DeleteLocalRef(s_env, this_class);
+    jclass this_class = (*env)->GetObjectClass(env, this);
+    jfieldID fidNumber = (*env)->GetFieldID(env, this_class,
+                                            "vpnCallbacks",
+                                            "Lwang/a1ex/android_4over6/VpnCallbacks;");
 
     if (NULL == fidNumber) do_debug("GetFieldID failed");
-    s_callbacks = (*s_env)->GetObjectField(s_env, s_this, fidNumber);
-    s_cls_callbacks = (*s_env)->FindClass(s_env, "wang/a1ex/android_4over6/VpnCallbacks");
+    jobject callbacks = (*env)->GetObjectField(env, this, fidNumber);
+    jclass cls_callbacks = (*env)->FindClass(env, "wang/a1ex/android_4over6/VpnCallbacks");
 
-    jint ret = startVpn();
+    // get remote port
+    fidNumber = (*env)->GetFieldID(env, this_class, "jcPort", "S");
+    (*env)->DeleteLocalRef(env, this_class);
+    if (fidNumber == NULL)
+        do_debug("GetFieldID 2 failed");
+    jshort jport = (*env)->GetShortField(env, this, fidNumber);
+
+    do_debug("jport %d", jport);
+
+    jint ret = 0;
+    ret = startVpn(env, this, callbacks, cls_callbacks, jport);
     do_debug("startVpn() returns %d", ret);
+
+    (*env)->DeleteLocalRef(env, callbacks);
+    (*env)->DeleteLocalRef(env, cls_callbacks);
     return ret;
 }

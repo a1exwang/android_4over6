@@ -18,16 +18,33 @@ package wang.a1ex.android_4over6;
 import android.annotation.TargetApi;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Path;
+import android.net.LocalServerSocket;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.util.Iterator;
+import java.util.Set;
 
 public class IVIVpnService extends VpnService implements Handler.Callback, Runnable {
     private static final String TAG = "IVIVpnService";
@@ -105,30 +122,88 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
 
         @Override
-        public int onReceiveDhcpAndCreateTun(String dhcpString, int pipeFd) {
+        public int onReceiveDhcpAndCreateTun(String dhcpString) {
             //Socket socket =
             return configure(dhcpString);
         }
 
         @Override
         public void onPacketReceived(int length, byte type, byte[] packet) {
-            Log.d("IVIVpnService", "onPacketReceived " + String.valueOf(length));
-            pcap.addPacket(packet);
-            pcap.saveToSDCardFile("vpn.pcap");
+            //Log.d("IVIVpnService", "onPacketReceived " + String.valueOf(length));
+            //pcap.addPacket(packet);
+            //pcap.saveToSDCardFile("vpn.pcap");
         }
 
         @Override
         public void onPacketSent(int length, byte type, byte[] packet) {
-            Log.d("IVIVpnService", "onPacketSent " + String.valueOf(length));
-            pcap.addPacket(packet);
-            pcap.saveToSDCardFile("vpn.pcap");
+            //Log.d("IVIVpnService", "onPacketSent " + String.valueOf(length));
+            //pcap.addPacket(packet);
+            //pcap.saveToSDCardFile("vpn.pcap");
         }
     };
 
+    public boolean processReadySet(Set readySet) throws IOException {
+        Iterator iterator = readySet.iterator();
+        while (iterator.hasNext()) {
+            SelectionKey key = (SelectionKey) iterator.next();
+            iterator.remove();
+            if (!key.isValid()) {
+                return false;
+            }
+            if (key.isAcceptable()) {
+                ServerSocketChannel ssChannel = (ServerSocketChannel) key.channel();
+                SocketChannel sChannel = ssChannel.accept();
+                sChannel.configureBlocking(false);
+                sChannel.register(key.selector(), SelectionKey.OP_READ);
+            }
+            if (key.isReadable()) {
+//                String msg = processRead(key);
+//                if (msg.length() > 0) {
+//                    SocketChannel sChannel = (SocketChannel) key.channel();
+//                    ByteBuffer buffer = ByteBuffer.wrap(msg.getBytes());
+//                    sChannel.write(buffer);
+//                }
+            }
+        }
+        return true;
+    }
+
     private void startVpnLoop() {
         while (true) {
-            VpnDevices vpnDevices = new VpnDevices(vpnCallbacks);
-            vpnDevices.startVpn();
+            try {
+//                VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, 0);
+//                vpnDevices.startVpn();
+                Selector selector = Selector.open();
+                ServerSocketChannel ssChannel = ServerSocketChannel.open();
+
+                ssChannel.configureBlocking(false);
+                ssChannel.socket().bind(new InetSocketAddress("127.0.0.1", 0));
+
+                final int port = ssChannel.socket().getLocalPort();
+                new Thread() {
+                    @Override
+                    public void run() {
+                        VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port);
+                        vpnDevices.startVpn();
+                    }
+                }.start();
+
+                ssChannel.register(selector, SelectionKey.OP_ACCEPT);
+
+                while (true) {
+                    if (selector.select() <= 0)
+                        continue;
+                    if (!processReadySet(selector.selectedKeys())) {
+                        break;
+                    }
+                }
+                ssChannel.close();
+                selector.close();
+
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 
