@@ -198,14 +198,25 @@ int read_n(int fd, char *buf, int n) {
      return n;
 }
 static char ip_str[1000] = { 0 };
-int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, jint jport) {
+static int tun2net = 0;
+static int net2tun = 0;
+static int tun2net_bytes = 0;
+static int net2tun_bytes = 0;
+int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, int jport, int reconnect) {
 
     int nread, nwrite;
     struct sockaddr_in6 remote;
     struct sockaddr_in java_addr;
     int net_fd, tun_fd, max_fd, timer_fd, jsock_fd;
-    int tun2net = 0, net2tun = 0, tun2net_bytes = 0, net2tun_bytes = 0;
     int ret;
+
+    // if reconnect, keep the statistics
+    if (!reconnect) {
+        tun2net = 0;
+        net2tun = 0;
+        tun2net_bytes = 0;
+        net2tun_bytes = 0;
+    }
 
     do_debug("startVpn start");
 
@@ -484,17 +495,24 @@ JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv
 
     // get remote port
     fidNumber = (*env)->GetFieldID(env, this_class, "jcPort", "I");
-    (*env)->DeleteLocalRef(env, this_class);
     if (fidNumber == NULL)
         do_debug("GetFieldID 2 failed");
     jint jport = (*env)->GetIntField(env, this, fidNumber);
 
+    // get is reconnect
+    // get remote port
+    fidNumber = (*env)->GetFieldID(env, this_class, "reconnect", "I");
+    if (fidNumber == NULL)
+        do_debug("GetFieldID reconnect failed");
+    jint reconnect = (*env)->GetIntField(env, this, fidNumber);
+
     do_debug("jport %d", jport);
 
     jint ret = 0;
-    ret = startVpn(env, this, callbacks, cls_callbacks, jport);
+    ret = startVpn(env, this, callbacks, cls_callbacks, jport, reconnect);
     do_debug("startVpn() returns %d", ret);
 
+    (*env)->DeleteLocalRef(env, this_class);
     (*env)->DeleteLocalRef(env, callbacks);
     (*env)->DeleteLocalRef(env, cls_callbacks);
     return ret;

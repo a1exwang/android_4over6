@@ -15,9 +15,11 @@ public class VpnDevices {
 
     private VpnCallbacks vpnCallbacks;
     private int jcPort;
-    public VpnDevices(VpnCallbacks vpnCallbacks, int jcPort) {
+    private int reconnect;
+    public VpnDevices(VpnCallbacks vpnCallbacks, int jcPort, int reconnect) {
         this.jcPort = jcPort;
         this.vpnCallbacks = vpnCallbacks;
+        this.reconnect = reconnect;
     }
 
     public native int startVpn();

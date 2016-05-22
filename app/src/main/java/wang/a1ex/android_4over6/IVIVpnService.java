@@ -112,10 +112,13 @@ public class IVIVpnService extends VpnService {
     };
 
     static Handler mVpnThreadHandler;
+
     static final int HT_MESSAGE_READ_SOCKET = 100;
     static final int HT_MESSAGE_STOP_VPN = 101;
     static final int HT_MESSAGE_START_VPN = 102;
     static final int HT_MESSAGE_VPN_CONNECTED = 103;
+    static final int HT_MESSAGE_VPN_SOCKET_BROKEN = 104;
+    static final int HT_MESSAGE_VPN_USER_DISCONNECT = 105;
 
     static final byte[] VPN_CONTROL_PACKET_SHUTDOWN = { 100 };
 
@@ -132,6 +135,7 @@ public class IVIVpnService extends VpnService {
                 public void handleMessage(Message message) {
                     byte[] socketBuf;
                     int size;
+                    IVIVpnService self;
                     switch (message.what) {
                         case HT_MESSAGE_VPN_CONNECTED:
                             Object[] ios = (Object[]) message.obj;
@@ -144,8 +148,8 @@ public class IVIVpnService extends VpnService {
                             Log.d(TAG, "read from jni socket bytes " + size);
                             break;
                         case HT_MESSAGE_START_VPN:
-                            IVIVpnService self = (IVIVpnService)message.obj;
-                            self.startVpnLoop();
+                            self = (IVIVpnService)message.obj;
+                            self.startVpnLoop(false);
                             break;
                         case HT_MESSAGE_STOP_VPN:
                             if (connected[0]) {
@@ -156,6 +160,15 @@ public class IVIVpnService extends VpnService {
                                     e.printStackTrace();
                                 }
                             }
+                            break;
+                        case HT_MESSAGE_VPN_USER_DISCONNECT:
+                            Log.d(TAG, "user disconnect vpn");
+                            self = (IVIVpnService) message.obj;
+                            self.hideNotification();
+                            break;
+                        case HT_MESSAGE_VPN_SOCKET_BROKEN:
+                            self = (IVIVpnService)message.obj;
+                            self.startVpnLoop(true);
                             break;
                     }
                 }
@@ -205,21 +218,30 @@ public class IVIVpnService extends VpnService {
         notificationManager.cancel(NOTIFICATION_ID);
     }
 
-    private void startVpnLoop() {
+    private void startVpnLoop(final boolean isReconnect) {
         new Thread() {
             @Override
             public void run() {
                 ServerSocket serverSocket;
                 Socket clientSocket;
-
                 try {
                     serverSocket = new ServerSocket(0);
                     final int port = serverSocket.getLocalPort();
                     new Thread() {
                         @Override
                         public void run() {
-                            VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port);
-                            vpnDevices.startVpn();
+                            VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port, isReconnect ? 1 : 0);
+                            int ret = vpnDevices.startVpn();
+                            int what;
+                            if (ret == 0) {
+                                what = HT_MESSAGE_VPN_USER_DISCONNECT;
+                            }
+                            else {
+                                what = HT_MESSAGE_VPN_SOCKET_BROKEN;
+                            }
+                            Message message = mVpnThreadHandler.obtainMessage(what);
+                            message.obj = IVIVpnService.this;
+                            message.sendToTarget();
                         }
                     }.start();
 
@@ -259,8 +281,6 @@ public class IVIVpnService extends VpnService {
                         message.sendToTarget();
                     }
                     clientSocket.close();
-                    hideNotification();
-
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
