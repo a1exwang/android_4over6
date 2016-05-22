@@ -45,4 +45,13 @@
         android:layout_below="@+id/textPacketsReceived"
         android:layout_alignParentLeft="true"
         android:layout_alignParentStart="true" />
+
+    <Button
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Stop VPN"
+        android:id="@+id/btnStopVpn"
+        android:layout_below="@+id/textBytesReceived"
+        android:layout_alignParentLeft="true"
+        android:layout_alignParentStart="true"/>
 </RelativeLayout>

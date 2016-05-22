@@ -24,6 +24,7 @@ import android.net.LocalSocket;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
@@ -47,61 +48,19 @@ import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Set;
 
-public class IVIVpnService extends VpnService implements Handler.Callback, Runnable {
+public class IVIVpnService extends VpnService {
+    public static final String VPN_SERVICE_INTENT_KEY = "IVIVpnService.key";
+    public static final int VPN_SERVICE_CONNECT = 0;
+    public static final int VPN_SERVICE_DISCONNECT = 1;
+
     private static final String TAG = "IVIVpnService";
     private static String ServerAddress = "2402:f000:1:4417::900";
     private static final String PCAP_FILE = "packets.pcap";
     private String mServerPort = "5678";
-    private Handler mHandler;
-    private Thread mThread;
     private static final long StatisticsInterval = 500;
     long lastStatisticsTime = 0;
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        // The handler is only used to show messages.
-        if (mHandler == null) {
-            mHandler = new Handler(this);
-        }
-        // Stop the previous session by interrupting the thread.
-        if (mThread != null) {
-            mThread.interrupt();
-        }
-        // Start a new session by creating a new thread.
-        mThread = new Thread(this, "IVIVpnThread");
-        mThread.start();
-        return START_STICKY;
-    }
-    @Override
-    public void onDestroy() {
-        if (mThread != null) {
-            mThread.interrupt();
-        }
-    }
-    @Override
-    public boolean handleMessage(Message message) {
-        if (message != null) {
-            if (message.obj != null) {
-                String str = (String) message.obj;
-                Toast.makeText(this, str, Toast.LENGTH_SHORT).show();
-            }
-            else {
-                Toast.makeText(this, message.what, Toast.LENGTH_SHORT).show();
-            }
 
-        }
-        return true;
-    }
     Pcap pcap;
-    @Override
-    public synchronized void run() {
-        try {
-            Log.i(TAG, "Starting");
-            pcap = new Pcap();
-            startVpnLoop();
-        } catch (Exception e) {
-            Log.e(TAG, "Got " + e.toString());
-        }
-    }
 
     VpnCallbacks vpnCallbacks = new VpnCallbacks() {
         @Override
@@ -143,69 +102,119 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         }
     };
 
-    public boolean processReadySet(Set readySet) throws IOException {
-        Iterator iterator = readySet.iterator();
-        while (iterator.hasNext()) {
-            SelectionKey key = (SelectionKey) iterator.next();
-            iterator.remove();
+    static Handler mVpnThreadHandler;
+    static final int HT_MESSAGE_READ_SOCKET = 100;
+    static final int HT_MESSAGE_STOP_VPN = 101;
+    static final int HT_MESSAGE_START_VPN = 102;
+    static final int HT_MESSAGE_VPN_CONNECTED = 103;
 
-            if (key.isAcceptable()) {
-                ServerSocketChannel ssChannel = (ServerSocketChannel) key.channel();
-                SocketChannel sChannel = ssChannel.accept();
-                sChannel.configureBlocking(false);
-                sChannel.register(key.selector(), SelectionKey.OP_READ);
-            }
+    static final byte[] VPN_CONTROL_PACKET_SHUTDOWN = { 100 };
 
-            if (!key.isValid()) {
-                return false;
-            }
-            if (key.isReadable()) {
-//                String msg = processRead(key);
-//                if (msg.length() > 0) {
-//                    SocketChannel sChannel = (SocketChannel) key.channel();
-//                    ByteBuffer buffer = ByteBuffer.wrap(msg.getBytes());
-//                    sChannel.write(buffer);
-//                }
-            }
+    static final Thread looperThread = new Thread() {
+        @Override
+        public void run() {
+            final InputStream[] is = {null};
+            final OutputStream[] os = {null};
+            final boolean[] connected = {false};
+
+            Looper.prepare();
+
+            mVpnThreadHandler = new Handler() {
+                @Override
+                public void handleMessage(Message message) {
+                    byte[] socketBuf;
+                    int size;
+                    switch (message.what) {
+                        case HT_MESSAGE_VPN_CONNECTED:
+                            Object[] ios = (Object[]) message.obj;
+                            is[0] = (InputStream) ios[0];
+                            os[0] = (OutputStream) ios[1];
+                            connected[0] = true;
+                            break;
+                        case HT_MESSAGE_READ_SOCKET:
+                            size = message.arg1;
+                            socketBuf = (byte[])message.obj;
+                            Log.d(TAG, "read from jni socket bytes " + size);
+                            break;
+                        case HT_MESSAGE_START_VPN:
+                            IVIVpnService self = (IVIVpnService)message.obj;
+                            self.startVpnLoop();
+                            break;
+                        case HT_MESSAGE_STOP_VPN:
+                            try {
+                                os[0].write(VPN_CONTROL_PACKET_SHUTDOWN);
+                                connected[0] = false;
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                            break;
+                    }
+                }
+            };
+            Looper.loop();
         }
-        return true;
-    }
+    };
 
     @TargetApi(Build.VERSION_CODES.KITKAT)
     private void startVpnLoop() {
-        while (true) {
-            try {
-                ServerSocket serverSocket = new ServerSocket(0);
-                serverSocket.bind(new InetSocketAddress("localhost", 0));
-                final int port = serverSocket.getLocalPort();
-                new Thread() {
-                    @Override
-                    public void run() {
-                        VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port);
-                        vpnDevices.startVpn();
+        new Thread() {
+            @Override
+            public void run() {
+                ServerSocket serverSocket;
+                Socket clientSocket;
+
+                try {
+                    serverSocket = new ServerSocket(0);
+                    final int port = serverSocket.getLocalPort();
+                    new Thread() {
+                        @Override
+                        public void run() {
+                            VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port);
+                            vpnDevices.startVpn();
+                        }
+                    }.start();
+
+                    clientSocket = serverSocket.accept();
+                    serverSocket.close();
+                    InputStream is = clientSocket.getInputStream();
+                    OutputStream os = clientSocket.getOutputStream();
+                    byte[] buf = new byte[2048];
+                    int readCount = is.read(buf);
+                    if (readCount != 4 || !(buf[0] == (byte) 0xff &&
+                            buf[1] == (byte) 0xee &&
+                            buf[2] == (byte) 0xdd &&
+                            buf[3] == (byte) 0xcc)) {
+                        throw new RuntimeException("magic error");
                     }
-                }.start();
+                    buf[0] = (byte) 0xff;
+                    buf[1] = (byte) 0xee;
+                    buf[2] = (byte) 0xdd;
+                    buf[3] = (byte) 0xcc;
+                    os.write(buf, 0, 4);
 
-                Socket clientSocket = serverSocket.accept();
+                    // connected
+                    Message message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_VPN_CONNECTED);
+                    message.obj = new Object[]{is, os};
+                    message.sendToTarget();
 
-                OutputStream os = clientSocket.getOutputStream();
-                Thread.sleep(10000);
+                    while (clientSocket.isConnected()) {
+                        readCount = is.read(buf);
+                        if (readCount < 0)
+                            break;
 
-            } catch (IOException e) {
-                e.printStackTrace();
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+                        message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_READ_SOCKET);
+                        message.arg1 = readCount;
+                        message.obj = buf;
+                        message.sendToTarget();
+                    }
+                    clientSocket.close();
+
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
+        }.start();
 
-
-//            new Thread() {
-//                @Override
-//                public void run() {
-//
-//                }
-//            }.start();
-
-        }
     }
 
     @TargetApi(Build.VERSION_CODES.LOLLIPOP)
@@ -234,4 +243,40 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         Log.i(TAG, "New interface: " + parameters);
         return tunIf.getFd();
     }
+
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        Message message;
+        switch (intent.getIntExtra(VPN_SERVICE_INTENT_KEY, -1)) {
+            case VPN_SERVICE_CONNECT:
+                for (int i = 0; i < 5; ++i) {
+                    if (mVpnThreadHandler != null) {
+                        message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_START_VPN);
+                        message.obj = this;
+                        message.sendToTarget();
+                        break;
+                    }
+                    try {
+                        Thread.sleep(300);
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+                break;
+            case VPN_SERVICE_DISCONNECT:
+                message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_STOP_VPN);
+                message.sendToTarget();
+                break;
+            default:
+                if (looperThread.getState() == Thread.State.NEW) {
+                    looperThread.start();
+                }
+        }
+        return START_STICKY;
+    }
+    @Override
+    public void onDestroy() {
+    }
+
 }

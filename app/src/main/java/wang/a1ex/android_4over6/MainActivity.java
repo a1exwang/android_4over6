@@ -17,6 +17,7 @@ import android.util.Log;
 import android.view.View;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -50,6 +51,18 @@ public class MainActivity extends AppCompatActivity {
         Toolbar toolbar = (Toolbar) findViewById(R.id.toolbar);
         setSupportActionBar(toolbar);
 
+        Button btnStopVpn = (Button) findViewById(R.id.btnStopVpn);
+        if (btnStopVpn != null) {
+            btnStopVpn.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    Intent intent = new Intent(MainActivity.this, IVIVpnService.class);
+                    intent.putExtra(IVIVpnService.VPN_SERVICE_INTENT_KEY, IVIVpnService.VPN_SERVICE_DISCONNECT);
+                    startService(intent);
+                }
+            });
+        }
+
         FloatingActionButton fab = (FloatingActionButton) findViewById(R.id.fab);
         assert fab != null;
         fab.setOnClickListener(new View.OnClickListener() {
@@ -67,10 +80,15 @@ public class MainActivity extends AppCompatActivity {
                 }
                 Intent intent = VpnService.prepare(MainActivity.this);
                 if (intent != null) {
+
                     startActivityForResult(intent, 0);
                 } else {
                     onActivityResult(0, RESULT_OK, null);
                 }
+
+                intent = new Intent(MainActivity.this, IVIVpnService.class);
+                intent.putExtra(IVIVpnService.VPN_SERVICE_INTENT_KEY, IVIVpnService.VPN_SERVICE_CONNECT);
+                startService(intent);
                 //Toast.makeText(MainActivity.this, new VpnDevices().getString(), Toast.LENGTH_SHORT).show();
             }
         });

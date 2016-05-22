@@ -225,6 +225,31 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     }
     do_debug("java socket connected port %d", jport);
 
+    // check magic number
+    unsigned char read_buf[100];
+    unsigned char magic[] = { 0xff, 0xee, 0xdd, 0xcc };
+    if (write(jsock_fd, magic, sizeof(magic)) < 0){
+        close(jsock_fd);
+        do_debug("write magic error");
+    }
+    if (read(jsock_fd, read_buf, sizeof(read_buf)) < 0) {
+        close(jsock_fd);
+        do_debug("read magic error");
+    }
+    if (memcmp(read_buf, magic, sizeof(magic)) != 0) {
+        close(jsock_fd);
+        do_debug("check magic error");
+    }
+    do_debug("check magic ok");
+
+    int flags = fcntl(jsock_fd, F_GETFL, 0);
+    if (flags < 0)
+        do_debug("change socket to non-blocking failed: fcntl failed, errno: %d", errno);
+    flags |= O_NONBLOCK;
+    if (fcntl(jsock_fd, F_SETFL, flags) < 0)
+        do_debug("change socket to non-blocking failed: fcntl 2 failed, errno: %d", errno);
+    do_debug("change java socket to non-blocking done");
+
 
     do_debug("started creating ipv6 socket");
     if ((net_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
@@ -260,7 +285,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     }
     do_debug("Successfully established tun device, fd %d", tun_fd);
 
-    int flags = fcntl(net_fd, F_GETFL, 0);
+    flags = fcntl(net_fd, F_GETFL, 0);
     if (flags < 0)
         do_debug("change socket to non-blocking failed: fcntl failed, errno: %d", errno);
     flags |= O_NONBLOCK;
@@ -294,10 +319,10 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
         fd_set rd_set;
 
         FD_ZERO(&rd_set);
+        FD_SET(jsock_fd, &rd_set);
         FD_SET(tun_fd, &rd_set);
         FD_SET(net_fd, &rd_set);
         FD_SET(timer_fd, &rd_set);
-        FD_SET(jsock_fd, &rd_set);
 
         ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
         if (ret < 0 && errno == EINTR) {
@@ -309,7 +334,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             break;
         }
 
-        if (FD_SET(jsock_fd, &rd_set)) {
+        if (FD_ISSET(jsock_fd, &rd_set)) {
             size_t size;
             do_debug("start read java socket");
 
@@ -319,7 +344,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             }
             // at least contains an opcode for 1 byte
             if (size == 0 || size > JAVA_JNI_PIPE_BUFFER_MAX_SIZE) {
-                do_debug("jsocket packet too big %d", size);
+                do_debug("jsocket packet size too big or zero, %d", size);
                 continue;
             }
 
