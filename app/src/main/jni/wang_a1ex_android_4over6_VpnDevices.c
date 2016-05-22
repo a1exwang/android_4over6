@@ -73,6 +73,11 @@ typedef struct tIVIMessage {
 #define IVI_SERVER_IPV6_ADDRESS "2402:f000:1:4417::900"
 #define IVI_SERVER_TCP_PORT 5678
 
+#define VPN_ERROR_NO_ERROR 0
+#define VPN_ERROR_CONNECTION_DOWN -1
+#define VPN_ERROR_CONNECTION_REFUSED -2
+#define VPN_ERROR_UNKNOWN -3
+
 /**************************************************************************
  * do_debug: prints debugging stuff (doh!)                                *
  **************************************************************************/
@@ -202,7 +207,8 @@ static int tun2net = 0;
 static int net2tun = 0;
 static int tun2net_bytes = 0;
 static int net2tun_bytes = 0;
-int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, int jport, int reconnect) {
+int start_vpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, int jport,
+              int reconnect) {
 
     int nread, nwrite;
     struct sockaddr_in6 remote;
@@ -222,7 +228,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
 
     if ((jsock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         do_debug("socket(AF_INET)");
-        return -1;
+        return VPN_ERROR_UNKNOWN;
     }
 
     memset(&java_addr, 0, sizeof(java_addr));
@@ -232,7 +238,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     if (connect(jsock_fd, (struct sockaddr*) &java_addr, sizeof(java_addr)) < 0) {
         close(jsock_fd);
         do_debug("connect jsocket failed errno %d", errno);
-        return -1;
+        return VPN_ERROR_UNKNOWN;
     }
     do_debug("java socket connected port %d", jport);
 
@@ -242,14 +248,17 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     if (write(jsock_fd, magic, sizeof(magic)) < 0){
         close(jsock_fd);
         do_debug("write magic error");
+        return VPN_ERROR_UNKNOWN;
     }
     if (read(jsock_fd, read_buf, sizeof(read_buf)) < 0) {
         close(jsock_fd);
         do_debug("read magic error");
+        return VPN_ERROR_UNKNOWN;
     }
     if (memcmp(read_buf, magic, sizeof(magic)) != 0) {
         close(jsock_fd);
         do_debug("check magic error");
+        return VPN_ERROR_UNKNOWN;
     }
     do_debug("check magic ok");
 
@@ -261,15 +270,14 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
         do_debug("change socket to non-blocking failed: fcntl 2 failed, errno: %d", errno);
     do_debug("change java socket to non-blocking done");
 
-
+    /* Client, try to connect to VPN server */
     do_debug("started creating ipv6 socket");
     if ((net_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
         do_debug("socket()");
         close(jsock_fd);
-        return -1;
+        return VPN_ERROR_UNKNOWN;
     }
 
-    /* Client, try to connect to server */
     memset(&remote, 0, sizeof(remote));
     remote.sin6_family = AF_INET6;
     inet_pton(AF_INET6, IVI_SERVER_IPV6_ADDRESS, remote.sin6_addr.s6_addr);
@@ -279,20 +287,21 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     ret = connect(net_fd, (struct sockaddr *) &remote, sizeof(remote));
     if (ret < 0) {
         do_debug("netfd connect() returns %d, errno, %d", ret, errno);
+        if (errno == ECONNREFUSED || errno == ENETUNREACH)
+            ret = VPN_ERROR_CONNECTION_REFUSED;
+        else
+            ret = VPN_ERROR_UNKNOWN;
         close(net_fd);
         close(jsock_fd);
-        return -1;
+        return ret;
     }
-
-//    inet_ntop(AF_INET6, &remote.sin6_addr, ip_str, sizeof(ip_str));
-//    do_debug("CLIENT: Connected to server %s\n", ip_str);
 
     /* initialize tun/tap interface */
     tun_fd = get_tun_fd(net_fd, env, callbacks, cls_callbacks);
     if (tun_fd < 0) {
         close(net_fd);
         close(jsock_fd);
-        return -1;
+        return VPN_ERROR_UNKNOWN;
     }
     do_debug("Successfully established tun device, fd %d", tun_fd);
 
@@ -327,6 +336,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
 
     do_debug("startVpn 4");
     while (1) {
+        int select_ret;
         fd_set rd_set;
 
         FD_ZERO(&rd_set);
@@ -335,13 +345,14 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
         FD_SET(net_fd, &rd_set);
         FD_SET(timer_fd, &rd_set);
 
-        ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
-        if (ret < 0 && errno == EINTR) {
+        select_ret = select(max_fd + 1, &rd_set, NULL, NULL, NULL);
+        if (select_ret < 0 && errno == EINTR) {
             continue;
         }
 
-        if (ret < 0) {
+        if (select_ret < 0) {
             do_debug("select error, error %d", errno);
+            ret = VPN_ERROR_CONNECTION_DOWN;
             break;
         }
 
@@ -371,6 +382,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             switch(buf[0]) {
                 case JAVA_JNI_PIPE_OPCODE_SHUTDOWN:
                     shutdown = 1;
+                    ret = VPN_ERROR_NO_ERROR;
                     break;
                 default:
                     do_debug("java jni pipe unknown opcode");
@@ -390,6 +402,10 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             message.type = MSG_HEARTBEAT;
             nwrite = write(net_fd, (char*)&message, (size_t) message.length);
             if (nwrite != message.length) {
+                if (errno == EPIPE) {
+                    ret = VPN_ERROR_CONNECTION_DOWN;
+                    break;
+                }
                 do_debug("send heartbeat failed %d, errno", nwrite, errno);
             }
             else {
@@ -415,8 +431,13 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             /* write length + packet */
             on_sent_packet(&message, env, callbacks, cls_callbacks);
             nwrite = write(net_fd, (char *) &message, (size_t) message.length);
-            if (nwrite < 0)
+            if (nwrite < 0) {
+                if (errno == EPIPE) {
+                    ret = VPN_ERROR_CONNECTION_DOWN;
+                    break;
+                }
                 do_debug("TUN2NET write error");
+            }
             //do_debug("TUN2NET %d: Written %d bytes to the network\n", tun2net, nwrite);
         }
 
@@ -434,6 +455,10 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             nread = read_n(net_fd, temp_buf, bytes_available);
 
             if (nread < IVI_MESSAGE_HEADER_LENGTH || nread > sizeof(IVIMessage)) {
+                if (errno == EPIPE) {
+                    ret = VPN_ERROR_CONNECTION_DOWN;
+                    break;
+                }
                 do_debug("wrong packet size %d", nread);
                 free(temp_buf);
                 continue;
@@ -479,7 +504,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     close(net_fd);
     close(jsock_fd);
 
-    return 0;
+    return ret;
 }
 
 JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv *env, jobject this) {
@@ -509,7 +534,7 @@ JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv
     do_debug("jport %d", jport);
 
     jint ret = 0;
-    ret = startVpn(env, this, callbacks, cls_callbacks, jport, reconnect);
+    ret = start_vpn(env, this, callbacks, cls_callbacks, jport, reconnect);
     do_debug("startVpn() returns %d", ret);
 
     (*env)->DeleteLocalRef(env, this_class);

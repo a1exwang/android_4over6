@@ -15,48 +15,32 @@ package wang.a1ex.android_4over6;
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import android.annotation.TargetApi;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.TaskStackBuilder;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Path;
-import android.net.LocalServerSocket;
-import android.net.LocalSocket;
 import android.net.VpnService;
-import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.ParcelFileDescriptor;
-import android.os.SystemClock;
-import android.provider.MediaStore;
-import android.support.v7.app.NotificationCompat;
+import android.support.v4.app.NotificationCompat;
 import android.util.Log;
-import android.widget.Toast;
 
-import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.ByteBuffer;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
-import java.util.Iterator;
 import java.util.Locale;
-import java.util.Set;
 
 public class IVIVpnService extends VpnService {
     public static final String VPN_SERVICE_INTENT_KEY = "IVIVpnService.key";
     public static final int VPN_SERVICE_CONNECT = 0;
     public static final int VPN_SERVICE_DISCONNECT = 1;
+    public static final int VPN_SERVICE_GET_STATUS = 2;
 
     private static final int NOTIFICATION_ID = 0x2233;
 
@@ -66,8 +50,10 @@ public class IVIVpnService extends VpnService {
     private String mServerPort = "5678";
     private static final long StatisticsInterval = 1000;
     long lastStatisticsTime = 0;
+    long vpnStartTime = 0;
 
     Pcap pcap;
+
 
     VpnCallbacks vpnCallbacks = new VpnCallbacks() {
         @Override
@@ -80,10 +66,9 @@ public class IVIVpnService extends VpnService {
             if (System.currentTimeMillis() - lastStatisticsTime > StatisticsInterval) {
                 lastStatisticsTime = System.currentTimeMillis();
                 Intent intent = new Intent(MainActivity.BROADCAST_NAME);
-                intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_SENT, sBytes);
-                intent.putExtra(MainActivity.BROADCAST_INTENT_BYTES_RECEIVED, rBytes);
-                intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_SEND, sPackets);
-                intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_RECEIVED, rPackets);
+                String txt = beautifyStatistics("connected", rBytes, rPackets, sBytes, sPackets, System.currentTimeMillis() - vpnStartTime);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_STATISTICS, txt);
+                intent.putExtra(MainActivity.BROADCAST_INTENT_STATUS, os != null);
                 sendBroadcast(intent);
 
                 showNotification("connected", rBytes, rPackets, sBytes, sPackets);
@@ -93,7 +78,7 @@ public class IVIVpnService extends VpnService {
         @Override
         public int onReceiveDhcpAndCreateTun(String dhcpString) {
             //Socket socket =
-            return configure(dhcpString);
+            return createTun(dhcpString);
         }
 
         @Override
@@ -110,6 +95,7 @@ public class IVIVpnService extends VpnService {
             //pcap.saveToSDCardFile("vpn.pcap");
         }
     };
+    OutputStream os = null;
 
     static Handler mVpnThreadHandler;
 
@@ -119,6 +105,12 @@ public class IVIVpnService extends VpnService {
     static final int HT_MESSAGE_VPN_CONNECTED = 103;
     static final int HT_MESSAGE_VPN_SOCKET_BROKEN = 104;
     static final int HT_MESSAGE_VPN_USER_DISCONNECT = 105;
+    static final int HT_MESSAGE_VPN_DOWN = 106;
+
+    static final int VPN_ERROR_NO_ERROR = 0;
+    static final int VPN_ERROR_CONNECTION_DOWN = -1;
+    static final int VPN_ERROR_CONNECTION_REFUSED = -2;
+    static final int VPN_ERROR_UNKNOWN = -3;
 
     static final byte[] VPN_CONTROL_PACKET_SHUTDOWN = { 100 };
 
@@ -149,7 +141,9 @@ public class IVIVpnService extends VpnService {
                             break;
                         case HT_MESSAGE_START_VPN:
                             self = (IVIVpnService)message.obj;
-                            self.startVpnLoop(false);
+                            self.vpnStartTime = System.currentTimeMillis();
+                            if (!connected[0])
+                                self.startVpnLoop(false);
                             break;
                         case HT_MESSAGE_STOP_VPN:
                             if (connected[0]) {
@@ -161,15 +155,30 @@ public class IVIVpnService extends VpnService {
                                 }
                             }
                             break;
-                        case HT_MESSAGE_VPN_USER_DISCONNECT:
-                            Log.d(TAG, "user disconnect vpn");
+                        case HT_MESSAGE_VPN_DOWN: {
                             self = (IVIVpnService) message.obj;
-                            self.hideNotification();
+                            switch(message.arg1) {
+                                case VPN_ERROR_NO_ERROR:
+                                    // user wants to shutdown vpn
+                                    Log.d(TAG, "user disconnect vpn");
+                                    self.hideNotification();
+                                    self.sendVpnDownBroadcast();
+                                    break;
+                                case VPN_ERROR_CONNECTION_DOWN:
+                                    // restart vpn
+                                    self.startVpnLoop(true);
+                                    break;
+                                case VPN_ERROR_CONNECTION_REFUSED:
+                                    self.showNotification("connection refused", 0, 0, 0, 0);
+                                    self.sendVpnDownBroadcast();
+                                    break;
+                                case VPN_ERROR_UNKNOWN:
+                                    self.showNotification("unknown error", 0, 0, 0, 0);
+                                    self.sendVpnDownBroadcast();
+                                    break;
+                            }
                             break;
-                        case HT_MESSAGE_VPN_SOCKET_BROKEN:
-                            self = (IVIVpnService)message.obj;
-                            self.startVpnLoop(true);
-                            break;
+                        }
                     }
                 }
             };
@@ -177,7 +186,7 @@ public class IVIVpnService extends VpnService {
         }
     };
 
-    private String beautifyFileSize(int size) {
+    private static String beautifyFileSize(int size) {
         if (size < 1024) {
             return String.format(Locale.CHINA, "%d B", size);
         }
@@ -191,26 +200,65 @@ public class IVIVpnService extends VpnService {
             return String.format(Locale.CHINA, "%.2f GiB", size / 1024.0 / 1024.0 / 1024.0);
         }
     }
+    private static String beautifyDuration(long t) {
+        long ms = t % 1000;
+        t /= 1000;
+        long s = t % 60;
+        t /= 60;
+        long min = t % 60;
+        t /= 60;
+        long h = t;
+        String ret = "";
+        if (h > 0) {
+            ret += String.format(Locale.CHINA, "%d:", h);
+        }
+        else if (min > 0) {
+            ret += String.format(Locale.CHINA, "%02d:", min);
+        }
+        ret += ret += String.format(Locale.CHINA, "%02d.%1d", s, ms/100);
+        return ret;
+    }
+    public static String beautifyStatistics(String status, int rBytes, int rPackets, int sBytes, int sPackets, long delta) {
+        double sRate = (double)sBytes / (delta+1) * 1000;
+        double rRate = (double)rBytes / (delta+1) * 1000;
+        return String.format(Locale.CHINA,
+                "⌚ %s \n\n↓ %s / %d\n↓ rate %s/s\n\n↑ %s / %d\n↑ rate %s/s",
+                beautifyDuration(delta),
+                beautifyFileSize(rBytes), rPackets, beautifyFileSize((int)rRate),
+                beautifyFileSize(sBytes), sPackets, beautifyFileSize((int)sRate));
+    }
 
     private void showNotification(String status, int rBytes, int rPackets, int sBytes, int sPackets) {
         Intent intent = new Intent(this, IVIVpnService.class);
         NotificationManager notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 
-        PendingIntent pendingIntent = PendingIntent.getActivity(this,
-                NOTIFICATION_ID, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+        Intent resultIntent = new Intent(this, MainActivity.class);
+
+        // Creating a artifical activity stack for the notification activity
+        TaskStackBuilder stackBuilder = TaskStackBuilder.create(this);
+        stackBuilder.addParentStack(MainActivity.class);
+        stackBuilder.addNextIntent(resultIntent);
+
+        // Pending intent to the notification manager
+        PendingIntent resultPending = stackBuilder.getPendingIntent(0, PendingIntent.FLAG_UPDATE_CURRENT);
+
+        // Building the notification
+        NotificationCompat.Builder mBuilder = new NotificationCompat.Builder(this)
+                .setSmallIcon(android.R.drawable.ic_notification_overlay) // notification icon
+                .setContentTitle("IVI VPN(" + status + ")")
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(
+                                beautifyStatistics(
+                                        status,
+                                        rBytes,
+                                        rPackets,
+                                        sBytes,
+                                        sPackets,
+                                        System.currentTimeMillis() - vpnStartTime)))
+                .setContentIntent(resultPending); // notification intent
 
 
-        Notification.Builder builder = new Notification.Builder(this)
-                .setContentTitle("Android IVI VPN")
-                .setStyle(new Notification.BigTextStyle().bigText(String.format(Locale.CHINA, "Received: %s / %d\n Sent: %s / %d",
-                        beautifyFileSize(rBytes), rPackets,
-                        beautifyFileSize(sBytes), sPackets)))
-                .setSmallIcon(android.R.drawable.ic_notification_overlay)
-                .setContentIntent(pendingIntent);
-        Notification n = builder.build();
-
+        Notification n = mBuilder.build();
         n.flags |= Notification.FLAG_NO_CLEAR | Notification.FLAG_ONGOING_EVENT;
-
         notificationManager.notify(NOTIFICATION_ID, n);
     }
     private void hideNotification() {
@@ -232,14 +280,8 @@ public class IVIVpnService extends VpnService {
                         public void run() {
                             VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, port, isReconnect ? 1 : 0);
                             int ret = vpnDevices.startVpn();
-                            int what;
-                            if (ret == 0) {
-                                what = HT_MESSAGE_VPN_USER_DISCONNECT;
-                            }
-                            else {
-                                what = HT_MESSAGE_VPN_SOCKET_BROKEN;
-                            }
-                            Message message = mVpnThreadHandler.obtainMessage(what);
+                            Message message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_VPN_DOWN);
+                            message.arg1 = ret;
                             message.obj = IVIVpnService.this;
                             message.sendToTarget();
                         }
@@ -248,7 +290,7 @@ public class IVIVpnService extends VpnService {
                     clientSocket = serverSocket.accept();
                     serverSocket.close();
                     InputStream is = clientSocket.getInputStream();
-                    OutputStream os = clientSocket.getOutputStream();
+                    os = clientSocket.getOutputStream();
                     byte[] buf = new byte[2048];
                     int readCount = is.read(buf);
                     if (readCount != 4 || !(buf[0] == (byte) 0xff &&
@@ -284,12 +326,13 @@ public class IVIVpnService extends VpnService {
                 } catch (IOException e) {
                     e.printStackTrace();
                 }
+                os = null;
             }
         }.start();
 
     }
 
-    private int configure(String parameters) {
+    private int createTun(String parameters) {
         // Configure a builder while parsing the parameters.
         Builder builder = new Builder();
         String[] parameterArray = parameters.split(" ");
@@ -316,6 +359,18 @@ public class IVIVpnService extends VpnService {
     }
 
     @Override
+    public void onCreate() {
+        looperThread.start();
+    }
+
+    void sendVpnDownBroadcast() {
+        Intent myIntent = new Intent(MainActivity.BROADCAST_NAME);
+        myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATISTICS, "unconnected");
+        myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATUS, false);
+        sendBroadcast(myIntent);
+    }
+
+    @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Message message;
         switch (intent.getIntExtra(VPN_SERVICE_INTENT_KEY, -1)) {
@@ -325,7 +380,6 @@ public class IVIVpnService extends VpnService {
                         message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_START_VPN);
                         message.obj = this;
                         message.sendToTarget();
-                        break;
                     }
                     try {
                         Thread.sleep(300);
@@ -340,15 +394,16 @@ public class IVIVpnService extends VpnService {
                     message.sendToTarget();
                 }
                 break;
+            case VPN_SERVICE_GET_STATUS:
+                Intent myIntent = new Intent(MainActivity.BROADCAST_NAME);
+                String txt = beautifyStatistics(os != null ? "connected" : "unconnected",
+                        0, 0, 0, 0, System.currentTimeMillis() - vpnStartTime);
+                myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATISTICS, txt);
+                myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATUS, os != null);
+                sendBroadcast(myIntent);
+                break;
             default:
-                if (looperThread.getState() == Thread.State.NEW) {
-                    looperThread.start();
-                }
         }
         return START_STICKY;
     }
-    @Override
-    public void onDestroy() {
-    }
-
 }
