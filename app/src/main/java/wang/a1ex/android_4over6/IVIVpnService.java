@@ -16,6 +16,9 @@ package wang.a1ex.android_4over6;
  * limitations under the License.
  */
 import android.annotation.TargetApi;
+import android.app.Notification;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Path;
@@ -29,6 +32,7 @@ import android.os.Message;
 import android.os.ParcelFileDescriptor;
 import android.os.SystemClock;
 import android.provider.MediaStore;
+import android.support.v7.app.NotificationCompat;
 import android.util.Log;
 import android.widget.Toast;
 
@@ -46,6 +50,7 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.Iterator;
+import java.util.Locale;
 import java.util.Set;
 
 public class IVIVpnService extends VpnService {
@@ -53,11 +58,13 @@ public class IVIVpnService extends VpnService {
     public static final int VPN_SERVICE_CONNECT = 0;
     public static final int VPN_SERVICE_DISCONNECT = 1;
 
+    private static final int NOTIFICATION_ID = 0x2233;
+
     private static final String TAG = "IVIVpnService";
     private static String ServerAddress = "2402:f000:1:4417::900";
     private static final String PCAP_FILE = "packets.pcap";
     private String mServerPort = "5678";
-    private static final long StatisticsInterval = 500;
+    private static final long StatisticsInterval = 1000;
     long lastStatisticsTime = 0;
 
     Pcap pcap;
@@ -78,6 +85,8 @@ public class IVIVpnService extends VpnService {
                 intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_SEND, sPackets);
                 intent.putExtra(MainActivity.BROADCAST_INTENT_PACKETS_RECEIVED, rPackets);
                 sendBroadcast(intent);
+
+                showNotification("connected", rBytes, rPackets, sBytes, sPackets);
             }
         }
 
@@ -113,7 +122,6 @@ public class IVIVpnService extends VpnService {
     static final Thread looperThread = new Thread() {
         @Override
         public void run() {
-            final InputStream[] is = {null};
             final OutputStream[] os = {null};
             final boolean[] connected = {false};
 
@@ -127,7 +135,6 @@ public class IVIVpnService extends VpnService {
                     switch (message.what) {
                         case HT_MESSAGE_VPN_CONNECTED:
                             Object[] ios = (Object[]) message.obj;
-                            is[0] = (InputStream) ios[0];
                             os[0] = (OutputStream) ios[1];
                             connected[0] = true;
                             break;
@@ -141,11 +148,13 @@ public class IVIVpnService extends VpnService {
                             self.startVpnLoop();
                             break;
                         case HT_MESSAGE_STOP_VPN:
-                            try {
-                                os[0].write(VPN_CONTROL_PACKET_SHUTDOWN);
-                                connected[0] = false;
-                            } catch (IOException e) {
-                                e.printStackTrace();
+                            if (connected[0]) {
+                                try {
+                                    os[0].write(VPN_CONTROL_PACKET_SHUTDOWN);
+                                    connected[0] = false;
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
                             }
                             break;
                     }
@@ -155,7 +164,47 @@ public class IVIVpnService extends VpnService {
         }
     };
 
-    @TargetApi(Build.VERSION_CODES.KITKAT)
+    private String beautifyFileSize(int size) {
+        if (size < 1024) {
+            return String.format(Locale.CHINA, "%d B", size);
+        }
+        else if (1024 < size && size < 1024 * 1024) {
+            return String.format(Locale.CHINA, "%3.2f KiB", size / 1024.0);
+        }
+        else if (1024 * 1024 < size && size < 1024 * 1024 * 1024) {
+            return String.format(Locale.CHINA, "%3.2f MiB", size / 1024.0 / 1024.0);
+        }
+        else {
+            return String.format(Locale.CHINA, "%.2f GiB", size / 1024.0 / 1024.0 / 1024.0);
+        }
+    }
+
+    private void showNotification(String status, int rBytes, int rPackets, int sBytes, int sPackets) {
+        Intent intent = new Intent(this, IVIVpnService.class);
+        NotificationManager notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+        PendingIntent pendingIntent = PendingIntent.getActivity(this,
+                NOTIFICATION_ID, intent, PendingIntent.FLAG_UPDATE_CURRENT);
+
+
+        Notification.Builder builder = new Notification.Builder(this)
+                .setContentTitle("Android IVI VPN")
+                .setStyle(new Notification.BigTextStyle().bigText(String.format(Locale.CHINA, "Received: %s / %d\n Sent: %s / %d",
+                        beautifyFileSize(rBytes), rPackets,
+                        beautifyFileSize(sBytes), sPackets)))
+                .setSmallIcon(android.R.drawable.ic_notification_overlay)
+                .setContentIntent(pendingIntent);
+        Notification n = builder.build();
+
+        n.flags |= Notification.FLAG_NO_CLEAR | Notification.FLAG_ONGOING_EVENT;
+
+        notificationManager.notify(NOTIFICATION_ID, n);
+    }
+    private void hideNotification() {
+        NotificationManager notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+        notificationManager.cancel(NOTIFICATION_ID);
+    }
+
     private void startVpnLoop() {
         new Thread() {
             @Override
@@ -197,6 +246,8 @@ public class IVIVpnService extends VpnService {
                     message.obj = new Object[]{is, os};
                     message.sendToTarget();
 
+                    showNotification("established", 0, 0, 0, 0);
+
                     while (clientSocket.isConnected()) {
                         readCount = is.read(buf);
                         if (readCount < 0)
@@ -208,6 +259,7 @@ public class IVIVpnService extends VpnService {
                         message.sendToTarget();
                     }
                     clientSocket.close();
+                    hideNotification();
 
                 } catch (IOException e) {
                     e.printStackTrace();
@@ -217,20 +269,20 @@ public class IVIVpnService extends VpnService {
 
     }
 
-    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
     private int configure(String parameters) {
         // Configure a builder while parsing the parameters.
         Builder builder = new Builder();
         String[] parameterArray = parameters.split(" ");
         if (parameterArray.length >= 5) {
             String ip = parameterArray[0];
-            String route = parameterArray[1];
+            //String route = parameterArray[1];
             builder.setMtu(1500);
             builder.addAddress(ip, 24);
             builder.addRoute("0.0.0.0", 0);
             builder.addDnsServer("166.111.8.28");
-            builder.setBlocking(true);
+            builder.setBlocking(false);
             try {
+                // by pass self
                 builder.addDisallowedApplication("wang.a1ex.android_4over6");
             } catch (PackageManager.NameNotFoundException e) {
                 e.printStackTrace();
@@ -238,12 +290,10 @@ public class IVIVpnService extends VpnService {
             //for (int i = 0; i < 3; ++i)
             //    builder.addDnsServer(parameterArray[2 + i]);
         }
-        // Create a new interface using the builder and save the parameters.
         ParcelFileDescriptor tunIf = builder.setSession(ServerAddress).establish();
         Log.i(TAG, "New interface: " + parameters);
         return tunIf.getFd();
     }
-
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -265,8 +315,10 @@ public class IVIVpnService extends VpnService {
                 }
                 break;
             case VPN_SERVICE_DISCONNECT:
-                message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_STOP_VPN);
-                message.sendToTarget();
+                if (mVpnThreadHandler != null) {
+                    message = mVpnThreadHandler.obtainMessage(HT_MESSAGE_STOP_VPN);
+                    message.sendToTarget();
+                }
                 break;
             default:
                 if (looperThread.getState() == Thread.State.NEW) {
