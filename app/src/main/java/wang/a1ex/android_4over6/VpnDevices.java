@@ -14,9 +14,9 @@ public class VpnDevices {
     }
 
     private VpnCallbacks vpnCallbacks;
-    private short jcPort;
+    private int jcPort;
     public VpnDevices(VpnCallbacks vpnCallbacks, int jcPort) {
-        this.jcPort = (short) jcPort;
+        this.jcPort = jcPort;
         this.vpnCallbacks = vpnCallbacks;
     }
 

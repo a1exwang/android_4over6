@@ -20,6 +20,7 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Path;
 import android.net.LocalServerSocket;
+import android.net.LocalSocket;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Handler;
@@ -147,14 +148,16 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         while (iterator.hasNext()) {
             SelectionKey key = (SelectionKey) iterator.next();
             iterator.remove();
-            if (!key.isValid()) {
-                return false;
-            }
+
             if (key.isAcceptable()) {
                 ServerSocketChannel ssChannel = (ServerSocketChannel) key.channel();
                 SocketChannel sChannel = ssChannel.accept();
                 sChannel.configureBlocking(false);
                 sChannel.register(key.selector(), SelectionKey.OP_READ);
+            }
+
+            if (!key.isValid()) {
+                return false;
             }
             if (key.isReadable()) {
 //                String msg = processRead(key);
@@ -168,18 +171,13 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
         return true;
     }
 
+    @TargetApi(Build.VERSION_CODES.KITKAT)
     private void startVpnLoop() {
         while (true) {
             try {
-//                VpnDevices vpnDevices = new VpnDevices(vpnCallbacks, 0);
-//                vpnDevices.startVpn();
-                Selector selector = Selector.open();
-                ServerSocketChannel ssChannel = ServerSocketChannel.open();
-
-                ssChannel.configureBlocking(false);
-                ssChannel.socket().bind(new InetSocketAddress("127.0.0.1", 0));
-
-                final int port = ssChannel.socket().getLocalPort();
+                ServerSocket serverSocket = new ServerSocket(0);
+                serverSocket.bind(new InetSocketAddress("localhost", 0));
+                final int port = serverSocket.getLocalPort();
                 new Thread() {
                     @Override
                     public void run() {
@@ -188,22 +186,25 @@ public class IVIVpnService extends VpnService implements Handler.Callback, Runna
                     }
                 }.start();
 
-                ssChannel.register(selector, SelectionKey.OP_ACCEPT);
+                Socket clientSocket = serverSocket.accept();
 
-                while (true) {
-                    if (selector.select() <= 0)
-                        continue;
-                    if (!processReadySet(selector.selectedKeys())) {
-                        break;
-                    }
-                }
-                ssChannel.close();
-                selector.close();
+                OutputStream os = clientSocket.getOutputStream();
+                Thread.sleep(10000);
 
-
-            } catch (Exception e) {
+            } catch (IOException e) {
+                e.printStackTrace();
+            } catch (InterruptedException e) {
                 e.printStackTrace();
             }
+
+
+//            new Thread() {
+//                @Override
+//                public void run() {
+//
+//                }
+//            }.start();
+
         }
     }
 

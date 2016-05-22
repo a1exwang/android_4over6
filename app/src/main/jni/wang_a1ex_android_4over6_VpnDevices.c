@@ -33,6 +33,7 @@
 #include <linux/if_tun.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <arpa/inet.h>
@@ -49,6 +50,7 @@
 int debug = 1;
 
 #define IVI_MESSAGE_MAX_SIZE 4096
+#define IVI_MESSAGE_HEADER_LENGTH 5
 
 typedef struct tIVIMessage {
     int length;
@@ -62,6 +64,7 @@ typedef struct tIVIMessage {
 #define MSG_HEARTBEAT 104
 
 #define HEARTBEAT_INTERVAL_SECONDS 5
+#define JAVA_JNI_UNIX_SOCKET_PATH "tmp/wang.a1ex.android_4over6.sock"
 #define JAVA_JNI_PIPE_JTOC_PATH "/tmp/wang.a1ex.android_4over6.pipe.jtoc"
 #define JAVA_JNI_PIPE_CTOJ_PATH "/tmp/wang.a1ex.android_4over6.pipe.ctoj"
 #define JAVA_JNI_PIPE_BUFFER_MAX_SIZE 1024
@@ -91,7 +94,7 @@ int get_tun_fd(int sock_fd, JNIEnv *env, jobject callbacks, jclass cls_callbacks
     memset(&dhcp_req, 0, sizeof(IVIMessage));
     memset(&dhcp_res, 0, sizeof(IVIMessage));
 
-    dhcp_req.length = 5;
+    dhcp_req.length = IVI_MESSAGE_HEADER_LENGTH;
     dhcp_req.type = MSG_DHCP_REQUEST;
 
     //struct timeval tv;
@@ -185,7 +188,7 @@ int read_n(int fd, char *buf, int n) {
      int nread, left = n;
 
      while(left > 0) {
-          if ((nread = read(fd, buf, left))==0){
+          if ((nread = read(fd, buf, (size_t)left))==0){
                return 0 ;
           }else {
                left -= nread;
@@ -195,7 +198,7 @@ int read_n(int fd, char *buf, int n) {
      return n;
 }
 static char ip_str[1000] = { 0 };
-int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, jshort jport) {
+int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks, jint jport) {
 
     int nread, nwrite;
     struct sockaddr_in6 remote;
@@ -207,31 +210,26 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     do_debug("startVpn start");
 
     if ((jsock_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        do_debug("socket()");
+        do_debug("socket(AF_INET)");
         return -1;
     }
 
-    /* Client, try to connect to server */
     memset(&java_addr, 0, sizeof(java_addr));
     java_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, "127.0.0.1", &java_addr.sin_addr.s_addr);
-    java_addr.sin_port = htons(jport);
-
-    /* connection request */
-    ret = connect(jsock_fd, (struct sockaddr *) &java_addr, sizeof(java_addr));
-    if (ret < 0) {
-        do_debug("connect() returns %d, errno, %d", ret, errno);
+    java_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    java_addr.sin_port = htons((unsigned short)jport);
+    if (connect(jsock_fd, (struct sockaddr*) &java_addr, sizeof(java_addr)) < 0) {
         close(jsock_fd);
+        do_debug("connect jsocket failed errno %d", errno);
         return -1;
     }
+    do_debug("java socket connected port %d", jport);
 
-    inet_ntop(AF_INET, &java_addr.sin_addr, ip_str, sizeof(ip_str));
-    do_debug("Connected to java %s\n", ip_str);
 
     do_debug("started creating ipv6 socket");
     if ((net_fd = socket(AF_INET6, SOCK_STREAM, 0)) < 0) {
         do_debug("socket()");
-        //close(jsock_fd);
+        close(jsock_fd);
         return -1;
     }
 
@@ -246,7 +244,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     if (ret < 0) {
         do_debug("netfd connect() returns %d, errno, %d", ret, errno);
         close(net_fd);
-        //close(jsock_fd);
+        close(jsock_fd);
         return -1;
     }
 
@@ -268,7 +266,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
     flags |= O_NONBLOCK;
     if (fcntl(net_fd, F_SETFL, flags) < 0)
         do_debug("change socket to non-blocking failed: fcntl 2 failed, errno: %d", errno);
-    do_debug("change socket to non-blocking done");
+    do_debug("change ipv6 socket to non-blocking done");
 
     /* initialize a timer */
     timer_fd = timerfd_create(CLOCK_REALTIME, NULL);
@@ -313,15 +311,23 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
 
         if (FD_SET(jsock_fd, &rd_set)) {
             size_t size;
-            do_debug("start read pipe");
-            if (read(jsock_fd, &size, sizeof(size)) && size < JAVA_JNI_PIPE_BUFFER_MAX_SIZE) {
-                do_debug("read pipe failed");
+            do_debug("start read java socket");
+
+            if (ioctl(jsock_fd, FIONREAD, &size) < 0) {
+                do_debug("ioctl get nread failed, errno %d", errno);
+                continue;
+            }
+            // at least contains an opcode for 1 byte
+            if (size == 0 || size > JAVA_JNI_PIPE_BUFFER_MAX_SIZE) {
+                do_debug("jsocket packet too big %d", size);
+                continue;
             }
 
             char *buf = malloc(size);
             int rresult = read(jsock_fd, buf, size);
             if (rresult != size) {
                 do_debug("java jni pipe packet wrong format");
+                free(buf);
                 continue;
             }
             char *str = buf + 1;
@@ -344,7 +350,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
         if (FD_ISSET(timer_fd, &rd_set)) {
             IVIMessage message;
             timerfd_gettime(timer_fd, NULL);
-            message.length = 5;
+            message.length = IVI_MESSAGE_HEADER_LENGTH;
             message.type = MSG_HEARTBEAT;
             nwrite = write(net_fd, (char*)&message, (size_t) message.length);
             if (nwrite != message.length) {
@@ -391,7 +397,7 @@ int startVpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks,
             char *temp_buf = malloc((size_t) bytes_available);
             nread = read_n(net_fd, temp_buf, bytes_available);
 
-            if (nread < 5 || nread > sizeof(IVIMessage)) {
+            if (nread < IVI_MESSAGE_HEADER_LENGTH || nread > sizeof(IVIMessage)) {
                 do_debug("wrong packet size %d", nread);
                 free(temp_buf);
                 continue;
@@ -452,11 +458,11 @@ JNIEXPORT jint JNICALL Java_wang_a1ex_android_14over6_VpnDevices_startVpn(JNIEnv
     jclass cls_callbacks = (*env)->FindClass(env, "wang/a1ex/android_4over6/VpnCallbacks");
 
     // get remote port
-    fidNumber = (*env)->GetFieldID(env, this_class, "jcPort", "S");
+    fidNumber = (*env)->GetFieldID(env, this_class, "jcPort", "I");
     (*env)->DeleteLocalRef(env, this_class);
     if (fidNumber == NULL)
         do_debug("GetFieldID 2 failed");
-    jshort jport = (*env)->GetShortField(env, this, fidNumber);
+    jint jport = (*env)->GetIntField(env, this, fidNumber);
 
     do_debug("jport %d", jport);
 
