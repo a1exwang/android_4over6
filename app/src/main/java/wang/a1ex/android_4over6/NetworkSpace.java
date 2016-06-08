@@ -21,7 +21,7 @@ import java.util.Vector;
 
 public class NetworkSpace {
 
-    static class ipAddress implements Comparable<ipAddress> {
+    static class MyIPAddress implements Comparable<MyIPAddress> {
         private BigInteger netAddress;
         public int networkMask;
         private boolean included;
@@ -36,7 +36,7 @@ public class NetworkSpace {
          *    2. smaller networks are returned as smaller
          */
         @Override
-        public int compareTo(@NonNull ipAddress another) {
+        public int compareTo(@NonNull MyIPAddress another) {
             int comp = getFirstAddress().compareTo(another.getFirstAddress());
             if (comp != 0)
                 return comp;
@@ -58,22 +58,22 @@ public class NetworkSpace {
          */
         @Override
         public boolean equals(Object o) {
-            if (!(o instanceof ipAddress))
+            if (!(o instanceof MyIPAddress))
                 return super.equals(o);
 
 
-            ipAddress on = (ipAddress) o;
+            MyIPAddress on = (MyIPAddress) o;
             return (networkMask == on.networkMask) && on.getFirstAddress().equals(getFirstAddress());
         }
 
-        public ipAddress(CIDRIP ip, boolean include) {
+        public MyIPAddress(CIDRIP ip, boolean include) {
             included = include;
             netAddress = BigInteger.valueOf(ip.getInt());
             networkMask = ip.len;
             isV4 = true;
         }
 
-        public ipAddress(Inet6Address address, int mask, boolean include) {
+        public MyIPAddress(Inet6Address address, int mask, boolean include) {
             networkMask = mask;
             included = include;
 
@@ -129,7 +129,7 @@ public class NetworkSpace {
                 return String.format(Locale.US, "%s/%d", getIPv6Address(), networkMask);
         }
 
-        ipAddress(BigInteger baseAddress, int mask, boolean included, boolean isV4) {
+        MyIPAddress(BigInteger baseAddress, int mask, boolean included, boolean isV4) {
             this.netAddress = baseAddress;
             this.networkMask = mask;
             this.included = included;
@@ -137,11 +137,11 @@ public class NetworkSpace {
         }
 
 
-        public ipAddress[] split() {
-            ipAddress firstHalf = new ipAddress(getFirstAddress(), networkMask + 1, included, isV4);
-            ipAddress secondHalf = new ipAddress(firstHalf.getLastAddress().add(BigInteger.ONE), networkMask + 1, included, isV4);
+        public MyIPAddress[] split() {
+            MyIPAddress firstHalf = new MyIPAddress(getFirstAddress(), networkMask + 1, included, isV4);
+            MyIPAddress secondHalf = new MyIPAddress(firstHalf.getLastAddress().add(BigInteger.ONE), networkMask + 1, included, isV4);
             if (BuildConfig.DEBUG) Assert.assertTrue(secondHalf.getLastAddress().equals(getLastAddress()));
-            return new ipAddress[]{firstHalf, secondHalf};
+            return new MyIPAddress[]{firstHalf, secondHalf};
         }
 
         String getIPv4Address() {
@@ -173,7 +173,7 @@ public class NetworkSpace {
             return ipv6str;
         }
 
-        public boolean containsNet(ipAddress network) {
+        public boolean containsNet(MyIPAddress network) {
             // this.first >= net.first &&  this.last <= net.last
             BigInteger ourFirst = getFirstAddress();
             BigInteger ourLast = getLastAddress();
@@ -187,13 +187,11 @@ public class NetworkSpace {
         }
     }
 
+    TreeSet<MyIPAddress> mIpAddresses = new TreeSet<MyIPAddress>();
 
-    TreeSet<ipAddress> mIpAddresses = new TreeSet<ipAddress>();
-
-
-    public Collection<ipAddress> getNetworks(boolean included) {
-        Vector<ipAddress> ips = new Vector<ipAddress>();
-        for (ipAddress ip : mIpAddresses) {
+    public Collection<MyIPAddress> getNetworks(boolean included) {
+        Vector<MyIPAddress> ips = new Vector<MyIPAddress>();
+        for (MyIPAddress ip : mIpAddresses) {
             if (ip.included == included)
                 ips.add(ip);
         }
@@ -207,33 +205,33 @@ public class NetworkSpace {
 
     void addIP(CIDRIP cidrIp, boolean include) {
 
-        mIpAddresses.add(new ipAddress(cidrIp, include));
+        mIpAddresses.add(new MyIPAddress(cidrIp, include));
     }
 
     public void addIPSplit(CIDRIP cidrIp, boolean include) {
-        ipAddress newIP = new ipAddress(cidrIp, include);
-        ipAddress[] splitIps = newIP.split();
-        for (ipAddress split: splitIps)
+        MyIPAddress newIP = new MyIPAddress(cidrIp, include);
+        MyIPAddress[] splitIps = newIP.split();
+        for (MyIPAddress split: splitIps)
             mIpAddresses.add(split);
     }
 
     void addIPv6(Inet6Address address, int mask, boolean included) {
-        mIpAddresses.add(new ipAddress(address, mask, included));
+        mIpAddresses.add(new MyIPAddress(address, mask, included));
     }
 
-    TreeSet<ipAddress> generateIPList() {
+    TreeSet<MyIPAddress> generateIPList() {
 
-        PriorityQueue<ipAddress> networks = new PriorityQueue<ipAddress>(mIpAddresses);
+        PriorityQueue<MyIPAddress> networks = new PriorityQueue<MyIPAddress>(mIpAddresses);
 
-        TreeSet<ipAddress> ipsDone = new TreeSet<ipAddress>();
+        TreeSet<MyIPAddress> ipsDone = new TreeSet<MyIPAddress>();
 
-        ipAddress currentNet =  networks.poll();
+        MyIPAddress currentNet =  networks.poll();
         if (currentNet==null)
             return ipsDone;
 
         while (currentNet!=null) {
             // Check if it and the next of it are compatible
-            ipAddress nextNet = networks.poll();
+            MyIPAddress nextNet = networks.poll();
 
             if (BuildConfig.DEBUG) Assert.assertNotNull(currentNet);
             if (nextNet== null || currentNet.getLastAddress().compareTo(nextNet.getFirstAddress()) == -1) {
@@ -250,7 +248,7 @@ public class NetworkSpace {
                         currentNet=nextNet;
                     } else {
                         // our currentNet is included in next and types differ. Need to split the next network
-                        ipAddress[] newNets = nextNet.split();
+                        MyIPAddress[] newNets = nextNet.split();
 
 
                         // TODO: The contains method of the Priority is stupid linear search
@@ -282,7 +280,7 @@ public class NetworkSpace {
                         // simply ignore the next and move on
                     } else {
                         // We need to split our network
-                        ipAddress[] newNets = currentNet.split();
+                        MyIPAddress[] newNets = currentNet.split();
 
 
                         if (newNets[1].networkMask == nextNet.networkMask) {
@@ -308,11 +306,11 @@ public class NetworkSpace {
         return ipsDone;
     }
 
-    Collection<ipAddress> getPositiveIPList() {
-        TreeSet<ipAddress> ipsSorted = generateIPList();
+    Collection<MyIPAddress> getPositiveIPList() {
+        TreeSet<MyIPAddress> ipsSorted = generateIPList();
 
-        Vector<ipAddress> ips = new Vector<ipAddress>();
-        for (ipAddress ia : ipsSorted) {
+        Vector<MyIPAddress> ips = new Vector<MyIPAddress>();
+        for (MyIPAddress ia : ipsSorted) {
             if (ia.included)
                 ips.add(ia);
         }
@@ -320,7 +318,7 @@ public class NetworkSpace {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.KITKAT) {
             // Include postive routes from the original set under < 4.4 since these might overrule the local
             // network but only if no smaller negative route exists
-            for(ipAddress origIp: mIpAddresses){
+            for(MyIPAddress origIp: mIpAddresses){
                 if (!origIp.included)
                     continue;
 
@@ -331,7 +329,7 @@ public class NetworkSpace {
                 boolean skipIp=false;
                 // If there is any smaller net that is excluded we may not add the positive route back
 
-                for (ipAddress calculatedIp: ipsSorted) {
+                for (MyIPAddress calculatedIp: ipsSorted) {
                     if(!calculatedIp.included && origIp.containsNet(calculatedIp)) {
                         skipIp=true;
                         break;

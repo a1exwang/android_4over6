@@ -32,8 +32,12 @@ import android.util.Log;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
+import java.util.Enumeration;
 import java.util.Locale;
 
 public class IVIVpnService extends VpnService {
@@ -66,7 +70,7 @@ public class IVIVpnService extends VpnService {
             if (System.currentTimeMillis() - lastStatisticsTime > StatisticsInterval) {
                 lastStatisticsTime = System.currentTimeMillis();
                 Intent intent = new Intent(MainActivity.BROADCAST_NAME);
-                String txt = beautifyStatistics("connected", rBytes, rPackets, sBytes, sPackets, System.currentTimeMillis() - vpnStartTime);
+                String txt = beautifyStatistics("connected", rBytes, rPackets, sBytes, sPackets, System.currentTimeMillis() - vpnStartTime, tunIPv4Address, localIPv6Address);
                 intent.putExtra(MainActivity.BROADCAST_INTENT_STATISTICS, txt);
                 intent.putExtra(MainActivity.BROADCAST_INTENT_STATUS, os != null);
                 sendBroadcast(intent);
@@ -169,11 +173,11 @@ public class IVIVpnService extends VpnService {
                                     self.startVpnLoop(true);
                                     break;
                                 case VPN_ERROR_CONNECTION_REFUSED:
-                                    self.showNotification("connection refused", 0, 0, 0, 0);
+                                    self.hideNotification();
                                     self.sendVpnDownBroadcast();
                                     break;
                                 case VPN_ERROR_UNKNOWN:
-                                    self.showNotification("unknown error", 0, 0, 0, 0);
+                                    self.hideNotification();
                                     self.sendVpnDownBroadcast();
                                     break;
                             }
@@ -215,17 +219,20 @@ public class IVIVpnService extends VpnService {
         else if (min > 0) {
             ret += String.format(Locale.CHINA, "%02d:", min);
         }
-        ret += ret += String.format(Locale.CHINA, "%02d.%1d", s, ms/100);
+        ret += String.format(Locale.CHINA, "%02d.%1d", s, ms/100);
         return ret;
     }
-    public static String beautifyStatistics(String status, int rBytes, int rPackets, int sBytes, int sPackets, long delta) {
+    public static String beautifyStatistics(String status, int rBytes, int rPackets, int sBytes, int sPackets, long delta, String tunIPv4Address, String localIPv6Address) {
         double sRate = (double)sBytes / (delta+1) * 1000;
         double rRate = (double)rBytes / (delta+1) * 1000;
         return String.format(Locale.CHINA,
-                "⌚ %s \n\n↓ %s / %d\n↓ rate %s/s\n\n↑ %s / %d\n↑ rate %s/s",
+                "⌚ %s \n\n↓ %s / %d\n↓ rate %s/s\n\n↑ %s / %d\n↑ rate %s/s\ntun %s\nlocal ipv6 %s",
                 beautifyDuration(delta),
                 beautifyFileSize(rBytes), rPackets, beautifyFileSize((int)rRate),
-                beautifyFileSize(sBytes), sPackets, beautifyFileSize((int)sRate));
+                beautifyFileSize(sBytes), sPackets, beautifyFileSize((int)sRate),
+                tunIPv4Address,
+                localIPv6Address
+                );
     }
 
     private void showNotification(String status, int rBytes, int rPackets, int sBytes, int sPackets) {
@@ -253,7 +260,9 @@ public class IVIVpnService extends VpnService {
                                         rPackets,
                                         sBytes,
                                         sPackets,
-                                        System.currentTimeMillis() - vpnStartTime)))
+                                        System.currentTimeMillis() - vpnStartTime,
+                                        tunIPv4Address,
+                                        localIPv6Address)))
                 .setContentIntent(resultPending); // notification intent
 
 
@@ -332,14 +341,33 @@ public class IVIVpnService extends VpnService {
 
     }
 
+    private String tunIPv4Address = "";
+    private String localIPv6Address = "";
     private int createTun(String parameters) {
         // Configure a builder while parsing the parameters.
         Builder builder = new Builder();
         String[] parameterArray = parameters.split(" ");
         if (parameterArray.length >= 5) {
             String ip = parameterArray[0];
+            tunIPv4Address = ip;
+            localIPv6Address = "";
+            try {
+                for (Enumeration<NetworkInterface> en = NetworkInterface.getNetworkInterfaces(); en.hasMoreElements(); ) {
+                    NetworkInterface intf = en.nextElement();
+                    for (Enumeration<InetAddress> enumIpAddr = intf.getInetAddresses(); enumIpAddr.hasMoreElements(); ) {
+                        InetAddress inetAddress = enumIpAddr.nextElement();
+                        if (!inetAddress.isLoopbackAddress() && !inetAddress.isLinkLocalAddress()) {
+                            if (inetAddress.getHostAddress().contains(":"))
+                                localIPv6Address += inetAddress.getHostAddress().split("%")[0] + "\n";
+                        }
+                    }
+                }
+            } catch (SocketException e) {
+                e.printStackTrace();
+            }
+
             //String route = parameterArray[1];
-            builder.setMtu(1500);
+            builder.setMtu(800);
             builder.addAddress(ip, 24);
             builder.addRoute("0.0.0.0", 0);
             builder.addDnsServer("166.111.8.28");
@@ -397,7 +425,7 @@ public class IVIVpnService extends VpnService {
             case VPN_SERVICE_GET_STATUS:
                 Intent myIntent = new Intent(MainActivity.BROADCAST_NAME);
                 String txt = beautifyStatistics(os != null ? "connected" : "unconnected",
-                        0, 0, 0, 0, System.currentTimeMillis() - vpnStartTime);
+                        0, 0, 0, 0, System.currentTimeMillis() - vpnStartTime, tunIPv4Address, localIPv6Address);
                 myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATISTICS, txt);
                 myIntent.putExtra(MainActivity.BROADCAST_INTENT_STATUS, os != null);
                 sendBroadcast(myIntent);

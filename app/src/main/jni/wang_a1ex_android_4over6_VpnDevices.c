@@ -202,7 +202,6 @@ int read_n(int fd, char *buf, int n) {
      }
      return n;
 }
-static char ip_str[1000] = { 0 };
 static int tun2net = 0;
 static int net2tun = 0;
 static int tun2net_bytes = 0;
@@ -314,7 +313,7 @@ int start_vpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks
     do_debug("change ipv6 socket to non-blocking done");
 
     /* initialize a timer */
-    timer_fd = timerfd_create(CLOCK_REALTIME, NULL);
+    timer_fd = timerfd_create(CLOCK_REALTIME, 0);
     struct itimerspec timer_p;
     timer_p.it_value.tv_nsec = 0;
     timer_p.it_value.tv_sec = 0;
@@ -377,7 +376,7 @@ int start_vpn(JNIEnv *env, jobject this, jobject callbacks, jclass cls_callbacks
                 free(buf);
                 continue;
             }
-            char *str = buf + 1;
+            //char *str = buf + 1;
             int shutdown = 0;
             switch(buf[0]) {
                 case JAVA_JNI_PIPE_OPCODE_SHUTDOWN:

@@ -18,6 +18,12 @@ import android.view.MenuItem;
 import android.widget.Button;
 import android.widget.TextView;
 
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.util.Collection;
+import java.util.Enumeration;
+
 public class MainActivity extends AppCompatActivity {
     final static int REQUEST_EXTERNAL_STORAGE = 123;
 
@@ -129,7 +135,8 @@ public class MainActivity extends AppCompatActivity {
         int id = item.getItemId();
 
         //noinspection SimplifiableIfStatement
-        if (id == R.id.action_settings) {
+        if (id == R.id.action_force_quit) {
+            stopVpn();
             return true;
         }
 
